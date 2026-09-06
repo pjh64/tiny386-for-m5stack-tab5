@@ -1,8 +1,12 @@
 #include "pc.h"
+#ifdef BUILD_ESP32
+#ifdef BUILD_ESP32
 #include "esp_heap_caps.h"
 #include "esp_attr.h"
 #include <stdio.h>
 #include "esp_timer.h"
+#endif
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
@@ -147,8 +151,18 @@ static void io_profiling_init(void) {
     if (io_profiling_initialized) return;
     io_profiling_initialized = 1;
     // Alloziere in PSRAM (SPIRAM), nicht im knappen internen RAM
+#ifdef BUILD_ESP32
+#ifdef BUILD_ESP32
     io_port_read_count = (uint32_t*)heap_caps_malloc(MAX_PROFILE_PORTS * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
     io_port_write_count = (uint32_t*)heap_caps_malloc(MAX_PROFILE_PORTS * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+#else
+    io_port_read_count = (uint32_t*)malloc(MAX_PROFILE_PORTS * sizeof(uint32_t));
+    io_port_write_count = (uint32_t*)malloc(MAX_PROFILE_PORTS * sizeof(uint32_t));
+#endif
+#else
+    io_port_read_count = (uint32_t*)malloc(MAX_PROFILE_PORTS * sizeof(uint32_t));
+    io_port_write_count = (uint32_t*)malloc(MAX_PROFILE_PORTS * sizeof(uint32_t));
+#endif
     if (io_port_read_count) memset(io_port_read_count, 0, MAX_PROFILE_PORTS * sizeof(uint32_t));
     if (io_port_write_count) memset(io_port_write_count, 0, MAX_PROFILE_PORTS * sizeof(uint32_t));
     if (!io_port_read_count || !io_port_write_count) {

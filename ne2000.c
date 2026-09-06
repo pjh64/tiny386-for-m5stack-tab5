@@ -782,8 +782,6 @@ static void qemu_send_packet_null(void *vc, uint8_t *buf, int size)
 	(void)buf;
 	(void)size;
 }
-    fprintf(stderr, "\n");
-}
 #endif
 
 static void ne2000_step_null(NE2000State *s)
