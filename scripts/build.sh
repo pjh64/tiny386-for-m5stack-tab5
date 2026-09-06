@@ -86,24 +86,18 @@ patch_idf_60() {
 }
 
 build_esp() {
-    mkdir -p out/esp &&
-	cd esp && rm -rf build sdkconfig && idf.py update-dependencies build &&
-	cd build &&
-	esptool.py --chip esp32s3 merge_bin -o flash_image_JC3248W535.bin '@flash_args' &&
-	cd .. &&
-	cp build/flash_image*.bin ../out/esp &&
-	cp tiny386.ini ../out/esp &&
-	cd ..
+    # Legacy ESP32-S3 build - disabled
+    echo "ESP32-S3 build is disabled. Use esp_p4 for ESP32-P4 / M5Stack Tab5."
 }
 
 build_esp_p4() {
     mkdir -p out/esp &&
-	cd esp && rm -rf build sdkconfig && idf.py -DBOARD=jc4880p443 update-dependencies build &&
+	cd esp && rm -rf build sdkconfig && idf.py -DBOARD=m5stack_tab5 update-dependencies build &&
 	cd build &&
-	esptool.py --chip esp32p4 merge_bin -o flash_image_JC4880P443.bin '@flash_args' &&
+	esptool.py --chip esp32p4 merge_bin -o flash_image_m5stack_tab5.bin '@flash_args' &&
 	cd .. &&
 	cp build/flash_image*.bin ../out/esp &&
-	cp tiny386.ini ../out/esp &&
+	cp tiny386_m5stack_tab5.ini ../out/esp/tiny386.ini &&
 	cd ..
 }
 
