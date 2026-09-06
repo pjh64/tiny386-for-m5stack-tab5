@@ -59,7 +59,7 @@ void storage_init(void)
 	// For setting a specific frequency, use host.max_freq_khz (range 400kHz - 40MHz for SDMMC)
 	// Example: for fixed frequency of 10MHz, use host.max_freq_khz = 10000;
 	sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-	host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+	host.max_freq_khz = 40000;  // 40MHz for faster boot
 #ifdef USE_HOSTED_WIFI
 	host.slot = SDMMC_HOST_SLOT_0;
 	host.init = &sdmmc_host_init_dummy;
@@ -125,7 +125,7 @@ void storage_init(void)
 	ESP_LOGI(TAG, "Initializing SD card");
 	ESP_LOGI(TAG, "Using SDMMC peripheral");
 	sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-	host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+	host.max_freq_khz = 40000;  // 40MHz for faster boot
 #ifdef USE_HOSTED_WIFI
 	host.slot = SDMMC_HOST_SLOT_0;
 	host.init = &sdmmc_host_init_dummy;

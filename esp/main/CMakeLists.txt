@@ -22,13 +22,14 @@ idf_component_register(SRCS "esp_main.c"
 "lcd_elecrow7s3.c"
 "sdmmc_crc_wrap.c"
 "i2s.c"
+"es8388.c"
 "storage.c"
 "usb_hid.c"
 "usb_input.c"
 INCLUDE_DIRS "")
 
 if(NOT DEFINED BOARD)
-    set(BOARD "jc3248w535")
+    set(BOARD "m5stack_tab5")
 endif()
 
 message(STATUS "Building for BOARD=${BOARD}")

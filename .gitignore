@@ -1,4 +1,41 @@
+# Build outputs
+build/
+*.bin
+*.elf
+*.map
+
+# ESP-IDF
+sdkconfig.old
+sdkconfig.broken*
+dependencies.lock
+
+# Python
+*.pyc
+__pycache__/
+*.py
+
+# Shell scripts and patches
+*.sh
+*.patch
+
+# Backups
+*.backup*
+*.bak
+*.good
 *~
-*.o
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Managed components (werden automatisch heruntergeladen)
+esp/managed_components/
+
+# Generated files
 .depends
-fmopl.inc

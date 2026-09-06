@@ -1,4 +1,7 @@
 #include "i386.h"
+
+// I/O Port Profiling
+void print_io_port_stats(void);
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -13,6 +16,58 @@
 #define IRAM_ATTR_CPU_EXEC1
 #define DRAM_ATTR
 #define noinline
+#endif
+
+
+#ifdef PROFILE_OPCODES
+#include <stdint.h>
+static uint64_t opcode_count[256] = {0};
+static uint64_t total_opcodes = 0;
+
+void print_opcode_stats(void) {
+    printf("\n=== Opcode Statistics (top 20) ===\n");
+    typedef struct { int op; uint64_t count; } op_stat;
+    static op_stat stats[256];  // static statt stack
+    for (int i = 0; i < 256; i++) {
+        stats[i].op = i;
+        stats[i].count = opcode_count[i];
+    }
+
+#ifdef PROFILE_OPCODES
+// Fast-Path Counter für Optimierungen
+static uint64_t fast_path_hits[256] = {0};
+static uint64_t fast_path_misses[256] = {0};
+
+void print_fast_path_stats(void) {
+    printf("\n=== Fast-Path Statistics ===\n");
+    for (int i = 0; i < 256; i++) {
+        if (fast_path_hits[i] > 0 || fast_path_misses[i] > 0) {
+            printf("  Opcode 0x%02x: %llu hits, %llu misses (%.1f%% hit rate)\n",
+                   i, fast_path_hits[i], fast_path_misses[i],
+                   100.0 * fast_path_hits[i] / (fast_path_hits[i] + fast_path_misses[i]));
+        }
+    }
+}
+#endif
+    // Sort by count (descending)
+    for (int i = 0; i < 255; i++) {
+        for (int j = i+1; j < 256; j++) {
+            if (stats[j].count > stats[i].count) {
+                op_stat tmp = stats[i];
+                stats[i] = stats[j];
+                stats[j] = tmp;
+            }
+        }
+    }
+    for (int i = 0; i < 20; i++) {
+        if (stats[i].count > 0) {
+            printf("  0x%02x: %llu (%.1f%%)\n", stats[i].op, 
+                   (unsigned long long)stats[i].count, 
+                   100.0*stats[i].count/total_opcodes);
+        }
+    }
+    printf("Total opcodes: %llu\n", (unsigned long long)total_opcodes);
+}
 #endif
 
 #define I386_OPT1
@@ -3934,7 +3989,17 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 
 	cpu->ip = cpu->next_ip;
 	TRY(fetch8pf(cpu, &b1));
+#ifdef PROFILE_OPCODES
+	opcode_count[b1]++;
+	total_opcodes++;
+#endif
 	cpu->cycle++;
+#ifdef PROFILE_OPCODES
+	if ((total_opcodes & 0xFFFFFF) == 0) {
+		print_opcode_stats();
+		print_io_port_stats();
+	}
+#endif
 
 #ifndef I386_OPT1
 	if (verbose) {

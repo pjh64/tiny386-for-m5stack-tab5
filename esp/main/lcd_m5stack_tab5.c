@@ -22,6 +22,7 @@
 #include "common.h"
 
 extern void pc_vga_step(void *pc);
+extern int pc_vga_idle(void *pc);
 
 static const char *TAG = "lcd_tab5";
 
@@ -409,7 +410,7 @@ void vga_task(void *arg)
             ESP_LOGW("PERF", "vga_step avg us=%ld", (long)(vacc / vc));
             vc = 0; vacc = 0;
         }
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+        if (pc_vga_idle(globals.pc)) vTaskDelay(1);
     }
 }
 

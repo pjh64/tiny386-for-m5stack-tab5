@@ -15,6 +15,7 @@ VGAState *vga_init(char *vga_ram, int vga_ram_size,
 void vga_set_force_8dm(VGAState *s, int v);
 
 int vga_step(VGAState *vga);
+int vga_is_idle(VGAState *vga);
 void vga_refresh(VGAState *s,
                  SimpleFBDrawFunc *redraw_func, void *opaque, int full_update);
 

@@ -32,6 +32,37 @@
 #include "vga.h"
 #include "pci.h"
 
+
+/* Fast-Path für 8bpp Planar VGA (shift_control == 0, plane_mask != 1) */
+static void vga_draw_8bpp_planar_fast(
+    uint8_t *vram, uint32_t addr, uint32_t *palette,
+    uint8_t *fb_data, int fb_width, int i0, int y, int w)
+{
+    /* 8-Pixel-Batching: Lade 4 Bytes, extrahiere 8 Pixel parallel */
+    for (int x = 0; x < w; x += 8) {
+        uint32_t addr_byte = addr + 4 * (x >> 3);
+        uint8_t p0 = vram[addr_byte];
+        uint8_t p1 = vram[addr_byte + 1];
+        uint8_t p2 = vram[addr_byte + 2];
+        uint8_t p3 = vram[addr_byte + 3];
+        
+        int base_i = 2 * (y * fb_width + x) + i0;
+        
+        /* 8 Pixel parallel extrahieren */
+        for (int bit = 7; bit >= 0; bit--) {
+            int k = ((p0 >> bit) & 1) |
+                    (((p1 >> bit) & 1) << 1) |
+                    (((p2 >> bit) & 1) << 2) |
+                    (((p3 >> bit) & 1) << 3);
+            
+            uint16_t color = palette[k] & 0xFFFF;
+            int i = base_i + 2 * (7 - bit);
+            fb_data[i] = color & 0xFF;
+            fb_data[i + 1] = color >> 8;
+        }
+    }
+}
+
 #ifdef BUILD_ESP32
 #include "esp_attr.h"
 void *pcmalloc(long size);
@@ -1118,6 +1149,16 @@ static void vga_graphic_refresh(VGAState *s,
         }
 
         uint32_t color_comp = 0;
+        
+        /* Fast-Path für 8bpp Planar (Mode 12 etc.) */
+#if BPP == 16
+        if (shift_control == 0 && xdiv == 1 && plane_mask != 1 && !s->comp_ntsc && w % 8 == 0) {
+            vga_draw_8bpp_planar_fast(vram, addr, palette, fb_dev->fb_data,
+                                       fb_dev->width, i0, y, w);
+        } else
+#endif
+        {
+        
         for (int x = 0; x < w; x++) {
             int x1 = x / xdiv;
             uint32_t color;
@@ -1240,7 +1281,8 @@ static void vga_graphic_refresh(VGAState *s,
 #error "bad bpp"
 #endif
         }
-        if (!multi_run) {
+        } // end of else (fast path fallback)
+                if (!multi_run) {
             int mask = (s->cr[0x17] & 3) ^ 3;
             if ((y1 & mask) == mask)
                 addr1 += line_offset;
@@ -1292,23 +1334,29 @@ int vga_step(VGAState *s)
 {
     uint32_t now = get_uticks();
     int ret = 0;
-    if (after_eq(now, s->retrace_time)) {
+    while (after_eq(now, s->retrace_time)) {
         if (s->retrace_phase == 0) {
             s->st01 |= ST01_DISP_ENABLE;
             s->retrace_phase = 1;
-            s->retrace_time = now + 833;
+            s->retrace_time += 833;
         } else if (s->retrace_phase == 1) {
             s->st01 |= ST01_V_RETRACE;
             s->retrace_phase = 2;
-            s->retrace_time = now + 833;
+            s->retrace_time += 833;
             ret = 1;
         } else {
             s->st01 &= ~(ST01_V_RETRACE | ST01_DISP_ENABLE);
             s->retrace_phase = 0;
-            s->retrace_time = now + RETRACE_INTERVAL_US;
+            s->retrace_time += RETRACE_INTERVAL_US;
         }
     }
     return ret;
+}
+
+
+int vga_is_idle(VGAState *s)
+{
+	return !after_eq(get_uticks(), s->retrace_time);
 }
 
 void vga_refresh(VGAState *s,
@@ -1449,8 +1497,21 @@ uint32_t vga_ioport_read(VGAState *s, uint32_t addr)
             break;
         case 0x3ba:
         case 0x3da:
-            /* just toggle to fool polling */
-//            s->st01 ^= ST01_V_RETRACE | ST01_DISP_ENABLE;
+            /* Fast-forward through entire retrace cycle */
+            {
+                uint32_t now = get_uticks();
+                if (s->st01 & ST01_V_RETRACE) {
+                    /* Guest wartet auf VRETRACE-clear (Phase 2->0) */
+                    s->st01 &= ~(ST01_V_RETRACE | ST01_DISP_ENABLE);
+                    s->retrace_phase = 0;
+                    s->retrace_time = now + RETRACE_INTERVAL_US;
+                } else {
+                    /* Guest wartet auf VRETRACE-set (Phase 0->2) */
+                    s->st01 |= ST01_DISP_ENABLE | ST01_V_RETRACE;
+                    s->retrace_phase = 2;
+                    s->retrace_time = now + 833;
+                }
+            }
             val = s->st01;
             s->ar_flip_flop = 0;
             break;

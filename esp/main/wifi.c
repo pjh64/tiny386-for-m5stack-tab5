@@ -1,9 +1,15 @@
-// WiFi stub - disabled for M5Stack Tab5
-// The Tab5 uses an ESP32-C6 co-processor for WiFi which requires separate initialization
+#include <stdatomic.h>
+#include "common.h"
+
+// NE2000 transmit hook: NULL = drop packets (no crash)
+void (*_Atomic esp32_send_packet)(uint8_t *buf, int size) = NULL;
 
 #include "common.h"
 
-void wifi_init(void) {
+void wifi_main(const char *ssid, const char *pass)
+{
     // WiFi not implemented for M5Stack Tab5
-    // The ESP32-C6 co-processor needs separate firmware and communication protocol
+    // Network packets will be dropped
+    (void)ssid;
+    (void)pass;
 }

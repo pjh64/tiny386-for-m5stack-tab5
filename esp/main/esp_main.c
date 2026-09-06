@@ -107,7 +107,61 @@ static TaskHandle_t disp_task_handle = NULL;
 static uint16_t *rot_buf = NULL;
 static uint16_t *snap_buf = NULL;
 static ppa_client_handle_t ppa_srm_handle = NULL;
-static volatile bool g_no_rotate = false;   /* Benchmark: Rotation aus */
+static volatile bool g_no_rotate = false;
+static SemaphoreHandle_t ppa_done_sem = NULL;
+static bool ppa_trans_done_cb(ppa_client_handle_t h, ppa_event_data_t *e, void *u)
+{
+    BaseType_t w = pdFALSE;
+    xSemaphoreGiveFromISR((SemaphoreHandle_t)u, &w);
+    return w == pdTRUE;
+}
+static void ppa_benchmark(void)
+{
+    if (!ppa_srm_handle) return;
+    ppa_srm_oper_config_t o;
+    int64_t a, b;
+    for (int i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++) rot_buf[i] = (uint16_t)((i * 2654435761u) >> 16);
+    esp_cache_msync(rot_buf, LCD_WIDTH * LCD_HEIGHT * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+    a = esp_timer_get_time();
+    memcpy(snap_buf, rot_buf, LCD_WIDTH * LCD_HEIGHT * 2);
+    esp_cache_msync(snap_buf, LCD_WIDTH * LCD_HEIGHT * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+    b = esp_timer_get_time();
+    ESP_LOGW("PPABENCH", "BUS cpu-memcpy 1.8MB: %lld us (~%d MB/s)", (long long)(b - a), (int)((LCD_WIDTH * LCD_HEIGHT * 2) / (b - a)));
+    memset(&o, 0, sizeof(o));
+    o.in.buffer = rot_buf; o.in.pic_w = 720; o.in.pic_h = 480;
+    o.in.block_w = 720; o.in.block_h = 480; o.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+    o.out.buffer = snap_buf; o.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+    o.mode = PPA_TRANS_MODE_BLOCKING; o.user_data = ppa_done_sem;
+    o.scale_x = 1.0f; o.scale_y = 1.0f; o.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+    o.out.buffer_size = (720 * 480 * 2 + 127) & ~127; o.out.pic_w = 720; o.out.pic_h = 480;
+    ppa_do_scale_rotate_mirror(ppa_srm_handle, &o);
+    a = esp_timer_get_time();
+    for (int i = 0; i < 5; i++) ppa_do_scale_rotate_mirror(ppa_srm_handle, &o);
+    b = esp_timer_get_time();
+    ESP_LOGW("PPABENCH", "BUS ppa-copy 720x480: %lld us", (long long)((b - a) / 5));
+    o.out.buffer_size = (1280 * 720 * 2 + 127) & ~127; o.out.pic_w = 1280; o.out.pic_h = 720;
+    o.scale_x = 1280.0f / 720.0f; o.scale_y = 720.0f / 480.0f;
+    ppa_do_scale_rotate_mirror(ppa_srm_handle, &o);
+    a = esp_timer_get_time();
+    for (int i = 0; i < 5; i++) ppa_do_scale_rotate_mirror(ppa_srm_handle, &o);
+    b = esp_timer_get_time();
+    ESP_LOGW("PPABENCH", "SCALE 720x480->1280x720: %lld us", (long long)((b - a) / 5));
+    o.out.buffer_size = (480 * 720 * 2 + 127) & ~127; o.out.pic_w = 480; o.out.pic_h = 720;
+    o.scale_x = 1.0f; o.scale_y = 1.0f; o.rotation_angle = PPA_SRM_ROTATION_ANGLE_270;
+    ppa_do_scale_rotate_mirror(ppa_srm_handle, &o);
+    a = esp_timer_get_time();
+    for (int i = 0; i < 5; i++) ppa_do_scale_rotate_mirror(ppa_srm_handle, &o);
+    b = esp_timer_get_time();
+    ESP_LOGW("PPABENCH", "ROTATE 720x480->480x720: %lld us", (long long)((b - a) / 5));
+    o.out.buffer_size = (720 * 1280 * 2 + 127) & ~127; o.out.pic_w = 720; o.out.pic_h = 1280;
+    o.scale_x = 1280.0f / 720.0f; o.scale_y = 720.0f / 480.0f;
+    ppa_do_scale_rotate_mirror(ppa_srm_handle, &o);
+    a = esp_timer_get_time();
+    for (int i = 0; i < 5; i++) ppa_do_scale_rotate_mirror(ppa_srm_handle, &o);
+    b = esp_timer_get_time();
+    ESP_LOGW("PPABENCH", "FULL scale+rotate ->720x1280: %lld us", (long long)((b - a) / 5));
+}
+   /* Benchmark: Rotation aus */
 static void display_task(void *arg);
 
 Console *console_init(int width, int height)
@@ -136,6 +190,11 @@ Console *console_init(int width, int height)
 			ppa_srm_handle = NULL;
 		} else {
 			ESP_LOGI("PPA", "SRM client registered");
+		ppa_done_sem = xSemaphoreCreateBinary();
+		xSemaphoreGive(ppa_done_sem);
+		ppa_event_callbacks_t cbs = { .on_trans_done = ppa_trans_done_cb };
+		ppa_client_register_event_callbacks(ppa_srm_handle, &cbs);
+		ppa_benchmark();
 		}
 	}
 	if (disp_task_handle == NULL)
@@ -173,8 +232,14 @@ static void display_task(void *arg)
 		int64_t t0 = esp_timer_get_time();
 		int64_t t1 = t0;   /* memcpy entfaellt */
 
+		int64_t t_cfg = 0, t_ppa = 0, t_edge = 0, t_sync = 0, t_wait = 0;
+
 		if (ppa_srm_handle) {
-			/* PPA-Hardware: Rotation 90° CCW + Spiegelung in einem Durchlauf */
+			/* PPA-Hardware: Rotation 270 + Skalierung in einem Durchlauf */
+			int64_t tw0 = esp_timer_get_time();
+			xSemaphoreTake(ppa_done_sem, portMAX_DELAY);
+			t_wait = esp_timer_get_time() - tw0;
+			int64_t tc0 = esp_timer_get_time();
 			ppa_srm_oper_config_t oper;
 			memset(&oper, 0, sizeof(oper));
 			oper.in.buffer  = src;
@@ -198,13 +263,13 @@ static void display_task(void *arg)
 			oper.out.pic_h       = LCD_WIDTH;   /* 1280 */
 			oper.out.srm_cm      = PPA_SRM_COLOR_MODE_RGB565;
 
-			/* Orientierung war mit 270° korrekt.
+			/* Orientierung war mit 270 korrekt.
 			 * PPA skaliert vor der Rotation:
 			 * 720x480 -> 1280x720, danach Rotation -> 720x1280. */
 			if (g_no_rotate) {
 				/* BENCHMARK: keine Rotation, nur Skalierung */
 				oper.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
-				oper.scale_x = 1.0f;
+				oper.scale_x = 1280.0f / 720.0f;
 				oper.scale_y = 1280.0f / 480.0f;
 			} else {
 				oper.rotation_angle = PPA_SRM_ROTATION_ANGLE_270;
@@ -213,10 +278,16 @@ static void display_task(void *arg)
 			}
 			oper.mirror_x = false;
 			oper.mirror_y = false;
-			oper.mode = PPA_TRANS_MODE_BLOCKING;
+			oper.mode = PPA_TRANS_MODE_NON_BLOCKING;
+			oper.user_data = ppa_done_sem;
+			int64_t tc1 = esp_timer_get_time();
+			t_cfg = tc1 - tc0;
 
 			esp_err_t perr = ppa_do_scale_rotate_mirror(ppa_srm_handle, &oper);
+			int64_t tc2 = esp_timer_get_time();
+			t_ppa = tc2 - tc1;
 			if (perr != ESP_OK) {
+				xSemaphoreGive(ppa_done_sem);
 				static int ec = 0;
 				if (++ec <= 3)
 					ESP_LOGE("PPA", "srm failed: %s", esp_err_to_name(perr));
@@ -229,6 +300,7 @@ static void display_task(void *arg)
 				}
 			}
 		} else {
+			int64_t tc1 = esp_timer_get_time();
 			/* Fallback: Software */
 			for (int y = 0; y < LCD_HEIGHT; y++) {
 				const uint16_t *row = src + (size_t) y * LCD_WIDTH;
@@ -236,36 +308,50 @@ static void display_task(void *arg)
 				for (int x = 0; x < LCD_WIDTH; x++)
 					dst[(size_t) x * LCD_HEIGHT] = row[LCD_WIDTH - 1 - x];
 			}
+			t_ppa = esp_timer_get_time() - tc1;
 		}
 
-		int64_t t2 = esp_timer_get_time();
-		/* Kanten-Artefakt der PPA-Rotation: die aeussersten rot_buf-Zeilen
-		 * (= linke/rechte Bildkante nach Rotation) schwarz setzen. */
+		/* Kanten-Artefakt der PPA-Rotation: aeusserste Zeilen schwarz */
+		int64_t te0 = esp_timer_get_time();
 		memset(out_buf, 0, 2 * 720 * 2);                      /* row 0..1  -> rechte Kante */
 		memset(out_buf + (1280 - 2) * 720, 0, 2 * 720 * 2);
-		esp_cache_msync(out_buf, 4 * 720 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
-		esp_cache_msync(out_buf + (1280 - 4) * 720, 4 * 720 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);   /* row last  -> linke Kante  */
-
-		/* Kanten-Artefakt der PPA-Rotation: die aeussersten rot_buf-Zeilen
-		 * (= linke/rechte Bildkante nach Rotation) schwarz setzen. */
 		memset(rot_buf, 0, 2 * 720 * 2);                      /* row 0..1  -> rechte Kante */
 		memset(rot_buf + (1280 - 2) * 720, 0, 2 * 720 * 2);   /* row last  -> linke Kante  */
+		int64_t te1 = esp_timer_get_time();
+		t_edge = te1 - te0;
+
+		esp_cache_msync(out_buf, 4 * 720 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+		esp_cache_msync(out_buf + (1280 - 4) * 720, 4 * 720 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+		int64_t t2 = esp_timer_get_time();
+		t_sync = t2 - te1;
 
 		if (!globals.panel_fb)
 			lcd_draw(0, 0, 720, 1280, rot_buf);
 		int64_t t3 = esp_timer_get_time();
 
 		static int fc = 0;
-		static int64_t acc_mem = 0, acc_tr = 0, acc_dr = 0;
+		static int64_t acc_mem = 0, acc_dr = 0;
+		static int64_t acc_cfg = 0, acc_ppa = 0, acc_edge = 0, acc_sync = 0, acc_wait = 0;
 		static int64_t last_log = 0;
-		acc_mem += t1 - t0;
-		acc_tr  += t2 - t1;
-		acc_dr  += t3 - t2;
+		acc_mem  += t1 - t0;
+		acc_cfg  += t_cfg;
+		acc_ppa  += t_ppa;
+		acc_edge += t_edge;
+		acc_sync += t_sync;
+		acc_wait += t_wait;
+		acc_dr   += t3 - t2;
 		fc++;
 		if (t3 - last_log > 1000000) {   /* 1x pro Sekunde */
-			ESP_LOGW("PERF", "disp fps=%d avg us: memcpy=%ld transpose=%ld draw=%ld",
-				 fc, (long)(acc_mem / fc), (long)(acc_tr / fc), (long)(acc_dr / fc));
-			fc = 0; acc_mem = acc_tr = acc_dr = 0; last_log = t3;
+			long tr = (long)((acc_cfg + acc_ppa + acc_edge + acc_sync) / fc);
+			ESP_LOGW("PERF", "disp fps=%d avg us: memcpy=%ld | tr=%ld [cfg=%ld ppa=%ld wait=%ld edge=%ld sync=%ld] | draw=%ld",
+				 fc, (long)(acc_mem / fc), tr,
+				 (long)(acc_cfg / fc), (long)(acc_ppa / fc), (long)(acc_wait / fc),
+				 (long)(acc_edge / fc), (long)(acc_sync / fc),
+				 (long)(acc_dr / fc));
+			fc = 0;
+			acc_mem = acc_dr = 0;
+			acc_cfg = acc_ppa = acc_edge = acc_sync = acc_wait = 0;
+			last_log = t3;
 		}
 	}
 }

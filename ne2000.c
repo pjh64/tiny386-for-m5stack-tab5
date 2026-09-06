@@ -759,28 +759,29 @@ static void *net_open_slirp(NE2000State *s)
 extern void (*_Atomic esp32_send_packet)(uint8_t *buf, int size);
 static void qemu_send_packet_null(void *vc, uint8_t *buf, int size)
 {
-    void (*send_packet)(uint8_t *buf, int size);
-    send_packet = atomic_load_explicit(&esp32_send_packet,
-                                       memory_order_relaxed);
-    if (send_packet)
-        send_packet(buf, size);
+	// Noop: Drop packets when no network backend is available
+	(void)vc;
+	(void)buf;
+	(void)size;
 }
 #elif defined(__wasm__)
 void on_packet_cb(uint8_t *buf, int size);
 static void qemu_send_packet_null(void *vc, uint8_t *buf, int size)
 {
-    on_packet_cb(buf, size);
+	// Noop: Drop packets when no network backend is available
+	(void)vc;
+	(void)buf;
+	(void)size;
 }
 #else
 #include <stdio.h>
 static void qemu_send_packet_null(void *vc, uint8_t *buf, int size)
 {
-    fprintf(stderr, "recv packet %d bytes:\n", size);
-    for (int i = 0; i < size; i++) {
-        if (i % 16 == 0)
-            fprintf(stderr, "\n");
-        fprintf(stderr, "%02x ", buf[i]);
-    }
+	// Noop: Drop packets when no network backend is available
+	(void)vc;
+	(void)buf;
+	(void)size;
+}
     fprintf(stderr, "\n");
 }
 #endif

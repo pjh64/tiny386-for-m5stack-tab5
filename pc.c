@@ -1,5 +1,8 @@
 #include "pc.h"
+#include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include <stdio.h>
+#include "esp_timer.h"
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
@@ -132,8 +135,103 @@ void pcmalloc_init(void *ptr, long len);
 #define pcmalloc_init(ptr, len)
 #endif
 
+
+// === I/O PORT PROFILING ===
+#define MAX_PROFILE_PORTS 65536
+// I/O Port Profiling - dynamisch in PSRAM alloziert (vermeidet BSS-Overflow)
+static uint32_t *io_port_read_count = NULL;
+static uint32_t *io_port_write_count = NULL;
+static int io_profiling_initialized = 0;
+
+static void io_profiling_init(void) {
+    if (io_profiling_initialized) return;
+    io_profiling_initialized = 1;
+    // Alloziere in PSRAM (SPIRAM), nicht im knappen internen RAM
+    io_port_read_count = (uint32_t*)heap_caps_malloc(MAX_PROFILE_PORTS * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+    io_port_write_count = (uint32_t*)heap_caps_malloc(MAX_PROFILE_PORTS * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+    if (io_port_read_count) memset(io_port_read_count, 0, MAX_PROFILE_PORTS * sizeof(uint32_t));
+    if (io_port_write_count) memset(io_port_write_count, 0, MAX_PROFILE_PORTS * sizeof(uint32_t));
+    if (!io_port_read_count || !io_port_write_count) {
+        printf("WARN: I/O profiling PSRAM alloc failed\n");
+    }
+}
+
+
+
+static uint32_t io_port_total_reads = 0;
+static uint32_t io_port_total_writes = 0;
+
+void print_io_port_stats(void) {
+    if (!io_profiling_initialized) io_profiling_init();
+    if (!io_port_read_count || !io_port_write_count) {
+        printf("I/O profiling not available (PSRAM alloc failed)\n");
+        return;
+    }
+    printf("\n=== I/O Port Statistics (Top 20 by reads) ===\n");
+    
+    // Finde Top-20 Ports nach Reads
+    int top_ports[20] = {0};
+    uint32_t top_counts[20] = {0};
+    
+    for (int i = 0; i < MAX_PROFILE_PORTS; i++) {
+        if (io_port_read_count[i] > 0) {
+            // Insertion in sortierte Liste
+            for (int j = 0; j < 20; j++) {
+                if (io_port_read_count[i] > top_counts[j]) {
+                    // Schiebe nach unten
+                    for (int k = 19; k > j; k--) {
+                        top_ports[k] = top_ports[k-1];
+                        top_counts[k] = top_counts[k-1];
+                    }
+                    top_ports[j] = i;
+                    top_counts[j] = io_port_read_count[i];
+                    break;
+                }
+            }
+        }
+    }
+    
+    printf("  Reads:\n");
+    for (int i = 0; i < 20 && top_counts[i] > 0; i++) {
+        printf("    Port 0x%04x: %u reads (%.1f%%)\n", 
+               top_ports[i], top_counts[i],
+               100.0 * top_counts[i] / (io_port_total_reads ? io_port_total_reads : 1));
+    }
+    
+    // Top-20 nach Writes
+    for (int i = 0; i < 20; i++) { top_ports[i] = 0; top_counts[i] = 0; }
+    for (int i = 0; i < MAX_PROFILE_PORTS; i++) {
+        if (io_port_write_count[i] > 0) {
+            for (int j = 0; j < 20; j++) {
+                if (io_port_write_count[i] > top_counts[j]) {
+                    for (int k = 19; k > j; k--) {
+                        top_ports[k] = top_ports[k-1];
+                        top_counts[k] = top_counts[k-1];
+                    }
+                    top_ports[j] = i;
+                    top_counts[j] = io_port_write_count[i];
+                    break;
+                }
+            }
+        }
+    }
+    
+    printf("  Writes:\n");
+    for (int i = 0; i < 20 && top_counts[i] > 0; i++) {
+        printf("    Port 0x%04x: %u writes (%.1f%%)\n", 
+               top_ports[i], top_counts[i],
+               100.0 * top_counts[i] / (io_port_total_writes ? io_port_total_writes : 1));
+    }
+    
+    printf("  Total: %u reads, %u writes\n\n", io_port_total_reads, io_port_total_writes);
+}
+// === END I/O PORT PROFILING ===
+
 static u8 pc_io_read(void *o, int addr)
 {
+    if (!io_profiling_initialized) io_profiling_init();
+    if (io_port_read_count) io_port_read_count[addr & 0xFFFF]++;
+    io_port_total_reads++;
 	PC *pc = o;
 	u8 val;
 
@@ -253,6 +351,14 @@ static u8 pc_io_read(void *o, int addr)
 	case 0x226: case 0x22a: case 0x22c: case 0x22d: case 0x22e: case 0x22f:
 		val = sb16_dsp_read(pc->sb16, addr);
 		return val;
+	case 0x330:
+		// MPU-401 MIDI Data port
+		return 0xff;
+	case 0x331:
+		// MPU-401 MIDI Status port
+		// Return 0x00 = all ready (bit 7=0 means "ready to accept")
+		// This breaks the polling loop immediately
+		return 0x00;
 	case 0xf1f4:
 		val = 0;
 		emulink_data_read_string(pc->emulink, &val, 1, 1);
@@ -265,6 +371,9 @@ static u8 pc_io_read(void *o, int addr)
 
 static u16 pc_io_read16(void *o, int addr)
 {
+    if (!io_profiling_initialized) io_profiling_init();
+    if (io_port_read_count) io_port_read_count[addr & 0xFFFF]++;
+    io_port_total_reads++;
 	PC *pc = o;
 	u16 val;
 
@@ -297,6 +406,9 @@ static u16 pc_io_read16(void *o, int addr)
 
 static u32 pc_io_read32(void *o, int addr)
 {
+    if (!io_profiling_initialized) io_profiling_init();
+    if (io_port_read_count) io_port_read_count[addr & 0xFFFF]++;
+    io_port_total_reads++;
 	PC *pc = o;
 	u32 val;
 	switch(addr) {
@@ -339,6 +451,9 @@ static int pc_io_read_string(void *o, int addr, uint8_t *buf, int size, int coun
 
 static void pc_io_write(void *o, int addr, u8 val)
 {
+    if (!io_profiling_initialized) io_profiling_init();
+    if (io_port_write_count) io_port_write_count[addr & 0xFFFF]++;
+    io_port_total_writes++;
 	PC *pc = o;
 	switch(addr) {
 	case 0x80: case 0xed:
@@ -485,6 +600,9 @@ static void pc_io_write(void *o, int addr, u8 val)
 
 static void pc_io_write16(void *o, int addr, u16 val)
 {
+    if (!io_profiling_initialized) io_profiling_init();
+    if (io_port_write_count) io_port_write_count[addr & 0xFFFF]++;
+    io_port_total_writes++;
 	PC *pc = o;
 	switch(addr) {
 	case 0x1f0:
@@ -521,6 +639,9 @@ static void pc_io_write16(void *o, int addr, u16 val)
 
 static void pc_io_write32(void *o, int addr, u32 val)
 {
+    if (!io_profiling_initialized) io_profiling_init();
+    if (io_port_write_count) io_port_write_count[addr & 0xFFFF]++;
+    io_port_total_writes++;
 	PC *pc = o;
 	switch(addr) {
 	case 0x1f0:
@@ -561,16 +682,31 @@ static int pc_io_write_string(void *o, int addr, uint8_t *buf, int size, int cou
 	return 0;
 }
 
+extern uint32_t get_uticks(void);
 void pc_vga_step(void *o)
 {
 	PC *pc = o;
 	int refresh = vga_step(pc->vga);
 	if (refresh) {
+		uint32_t r0 = get_uticks();
 		vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
 			    pc->full_update != 0);
+		uint32_t r1 = get_uticks();
+		static int rc = 0; static uint32_t racc = 0, rlast = 0;
+		racc += r1 - r0; rc++;
+		if (r1 - rlast > 1000000) {
+			fprintf(stderr, "VGA_REFRESH avg us=%u (n=%d)\n", racc / rc, rc);
+			rc = 0; racc = 0; rlast = r1;
+		}
 		if (pc->full_update == 2)
 			pc->full_update = 0;
 	}
+}
+
+int pc_vga_idle(void *o)
+{
+	PC *pc = o;
+	return vga_is_idle(pc->vga);
 }
 
 void pc_step(PC *pc)
