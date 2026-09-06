@@ -384,7 +384,7 @@ void vga_task(void *arg)
     
     /* Framebuffer erst NACH Panel-Init verfügbar */
     void *fb_ptr = NULL;
-    esp_err_t fb_err = esp_lcd_st7123_get_frame_buffer(panel, 1, &fb_ptr);
+    esp_err_t fb_err = esp_lcd_dpi_panel_get_frame_buffer(panel, 1, &fb_ptr);
     if (fb_err == ESP_OK && fb_ptr != NULL) {
         ESP_LOGI(TAG, "DPI framebuffer at %p (zero-copy mode)", fb_ptr);
         globals.panel_fb = fb_ptr;
