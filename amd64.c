@@ -4419,6 +4419,7 @@ CPUAMD64 *cpuamd64_new(int _, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 void cpuamd64_delete(CPUAMD64 *cpu)
 {
 	fpu_delete(cpu->fpu);
+	free(cpu->tlb.tab);
 	free(cpu);
 }
 

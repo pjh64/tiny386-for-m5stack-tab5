@@ -1,6 +1,7 @@
 'use strict';
 
-function get_tiny386(screen) {
+function get_tiny386(screen, wasm_name) {
+if (wasm_name === undefined) wasm_name = 'tiny386.wasm';
 
 let mem8;
 let logger = null;
@@ -452,7 +453,7 @@ function loads(files, i, cont) {
 
 function start(inifile)
 {
-    fetch('tiny386.wasm', fetchopt)
+    fetch(wasm_name, fetchopt)
         .then(response => response.arrayBuffer())
         .then(bytes => WebAssembly.compile(bytes))
         .then(module => new WebAssembly.Instance(module, imports))
