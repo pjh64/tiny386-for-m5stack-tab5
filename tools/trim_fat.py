@@ -108,9 +108,11 @@ def clean_fat_partition(f, partition_start_sector, bytes_per_sector=512):
     # Directory processing logic
     # =========================================================
     removed_e5_count = 0
+    slack_cleaned_count = 0
 
     def process_directory_data(dir_bytes):
         nonlocal removed_e5_count
+        nonlocal slack_cleaned_count
         valid_entries = []
         subdirectory_clusters = []
         has_e5 = False
@@ -130,6 +132,28 @@ def clean_fat_partition(f, partition_start_sector, bytes_per_sector=512):
                     continue
 
             valid_entries.append(entry)
+
+            if not (attr & 0x10) and not is_lfn:
+                file_size = int.from_bytes(entry[28:32], "little")
+                high_clust = int.from_bytes(entry[20:22], "little") if is_fat32 else 0
+                low_clust = int.from_bytes(entry[26:28], "little")
+                start_cluster = (high_clust << 16) | low_clust
+                if start_cluster >= 2:
+                    last_c = get_cluster_chain(start_cluster)[-1]
+
+                    # Calculate slack space size in the last cluster
+                    remainder = file_size % bytes_per_cluster
+                    if remainder > 0:
+                        slack_size = bytes_per_cluster - remainder
+                        slack_offset = get_cluster_offset(last_c) + remainder
+
+                        # Wipe the slack space with 0x00
+                        f.seek(slack_offset)
+                        current_slack_data = f.read(slack_size)
+                        if current_slack_data != b'\x00' * slack_size:
+                            f.seek(slack_offset)
+                            f.write(b'\x00' * slack_size)
+                            slack_cleaned_count += 1
 
             if (attr & 0x10) and not is_lfn:
                 name = entry[0:8].decode('ascii', errors='ignore').strip()
@@ -197,6 +221,7 @@ def clean_fat_partition(f, partition_start_sector, bytes_per_sector=512):
                 directory_queue.append(("sub_or_fat32root", get_cluster_chain(sc), 0))
 
     print(f"     [+] Optimized directories, removed {removed_e5_count} E5 entries.")
+    print(f"     [+] Overwrote residue for {slack_cleaned_count} files.")
 
     # =========================================================
     # Zero-filling unused clusters
