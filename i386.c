@@ -5236,6 +5236,9 @@ void cpui386_delete(CPUI386 *cpu)
 {
 	if (cpu->fpu)
 		fpu_delete(cpu->fpu);
+#ifndef BUILD_ESP32
+	free(cpu->tlb.tab);
+#endif
 	free(cpu);
 }
 
