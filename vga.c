@@ -165,6 +165,11 @@ static int after_eq(uint32_t a, uint32_t b)
     return (a - b) < (1u << 31);
 }
 
+static void simplefb_clear(FBDevice *fb_dev)
+{
+    memset(fb_dev->fb_data, 0, fb_dev->width * fb_dev->height * (BPP / 8));
+}
+
 #if BPP == 32
 static void vga_draw_glyph8(uint8_t *d, int linesize,
                             const uint8_t *font_ptr, int h,
@@ -710,6 +715,7 @@ static void vbe_update_vgaregs(VGAState *s)
     s->gr[VGA_GFX_MODE] = (s->gr[VGA_GFX_MODE] & ~0x60) |
         (shift_control << 5);
     s->cr[VGA_CRTC_MAX_SCAN] &= ~0x9f; /* no double scan */
+    simplefb_clear(s->fb_dev);
 }
 
 /* the text refresh is just for debugging and initial boot message, so
@@ -1282,12 +1288,6 @@ static void vga_graphic_refresh(VGAState *s,
     redraw_func(opaque, 0, 0, fb_dev->width, fb_dev->height);
 }
 
-static void simplefb_clear(FBDevice *fb_dev,
-               SimpleFBDrawFunc *redraw_func, void *opaque)
-{
-    memset(fb_dev->fb_data, 0, fb_dev->width * fb_dev->height * (BPP / 8));
-}
-
 int vga_step(VGAState *s)
 {
     uint32_t now = get_uticks();
@@ -1331,7 +1331,7 @@ void vga_refresh(VGAState *s,
         s->graphic_mode = graphic_mode;
         full_update = 1;
         s->cursor_blink_time = get_uticks();
-        simplefb_clear(fb_dev, redraw_func, opaque);
+        simplefb_clear(fb_dev);
     }
 
     if (s->graphic_mode == 2) {
@@ -1579,6 +1579,9 @@ void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
         default:
             s->cr[s->cr_index] = val;
             break;
+        }
+        if (s->graphic_mode == 2) {
+            simplefb_clear(s->fb_dev);
         }
         if (s->vga_text_ops && s->graphic_mode == 1) {
             int width = (s->cr[0x01] + 1);
