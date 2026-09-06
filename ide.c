@@ -31,6 +31,18 @@
 //#include "cutils.h"
 #include "ide.h"
 
+#ifdef BUILD_ESP32
+#include "esp_timer.h"
+#include "esp_heap_caps.h"
+unsigned long long ide_read_us;
+unsigned long ide_read_ops;
+unsigned long ide_read_sectors;
+unsigned long ide_cache_hits, ide_cache_misses;
+
+#define IDE_CACHE_LINE_SECTORS 8                    /* 4 KB */
+#define IDE_CACHE_LINES        512                  /* 2 MB total */
+#define IDE_CACHE_LINE_BYTES   (IDE_CACHE_LINE_SECTORS * 512)
+#endif
 //#define DEBUG_IDE
 //#define DEBUG_IDE_ATAPI
 
@@ -1902,6 +1914,10 @@ typedef struct BlockDeviceFile {
     int64_t nb_sectors;
     BlockDeviceModeEnum mode;
     uint8_t **sector_table;
+#ifdef BUILD_ESP32
+    uint8_t *cache;             /* IDE_CACHE_LINES * IDE_CACHE_LINE_BYTES */
+    int64_t *cache_tag;         /* line number held, or -1 */
+#endif
 } BlockDeviceFile;
 
 static int64_t bf_get_sector_count(BlockDevice *bs)
@@ -1926,7 +1942,6 @@ static int bf_read_async(BlockDevice *bs,
                          BlockDeviceCompletionFunc *cb, void *opaque)
 {
     BlockDeviceFile *bf = bs->opaque;
-    //    printf("bf_read_async: sector_num=%" PRId64 " n=%d\n", sector_num, n);
 #ifdef DUMP_BLOCK_READ
     {
         static FILE *f;
@@ -1950,13 +1965,52 @@ static int bf_read_async(BlockDevice *bs,
             buf += SECTOR_SIZE;
         }
     } else {
+#ifdef BUILD_ESP32
+        int64_t t0 = esp_timer_get_time();
+
+        if (bf->cache) {
+            while (n > 0) {
+                int64_t line = sector_num / IDE_CACHE_LINE_SECTORS;
+                int within = sector_num % IDE_CACHE_LINE_SECTORS;
+                int take = IDE_CACHE_LINE_SECTORS - within;
+                if (take > n)
+                    take = n;
+
+                int slot = (int)(line % IDE_CACHE_LINES);
+                uint8_t *ln = bf->cache + (size_t)slot * IDE_CACHE_LINE_BYTES;
+                if (bf->cache_tag[slot] != line) {
+                    off_t off = bf->start_offset +
+                        line * IDE_CACHE_LINE_SECTORS * SECTOR_SIZE;
+                    fseeko(bf->f, off, SEEK_SET);
+                    size_t got = fread(ln, 1, IDE_CACHE_LINE_BYTES, bf->f);
+                    if (got < IDE_CACHE_LINE_BYTES)
+                        memset(ln + got, 0, IDE_CACHE_LINE_BYTES - got);
+                    bf->cache_tag[slot] = line;
+                    ide_cache_misses++;
+                    ide_read_ops++;
+                    ide_read_sectors += IDE_CACHE_LINE_SECTORS;
+                } else {
+                    ide_cache_hits++;
+                }
+                memcpy(buf, ln + within * SECTOR_SIZE, take * SECTOR_SIZE);
+                buf += take * SECTOR_SIZE;
+                sector_num += take;
+                n -= take;
+            }
+            ide_read_us += esp_timer_get_time() - t0;
+            return 0;
+        }
+#endif
         fseeko(bf->f, bf->start_offset + sector_num * SECTOR_SIZE, SEEK_SET);
         fread(buf, 1, n * SECTOR_SIZE, bf->f);
+#ifdef BUILD_ESP32
+        ide_read_us += esp_timer_get_time() - t0;
+        ide_read_ops++;
+        ide_read_sectors += n;
+#endif
     }
-    /* synchronous read */
     return 0;
 }
-
 static int bf_write_async(BlockDevice *bs,
                           uint64_t sector_num, const uint8_t *buf, int n,
                           BlockDeviceCompletionFunc *cb, void *opaque)
@@ -1969,8 +2023,25 @@ static int bf_write_async(BlockDevice *bs,
         ret = -1; /* error */
         break;
     case BF_MODE_RW:
+#ifdef BUILD_ESP32
+        if (bf->cache) {
+            for (int i = 0; i < n; i++) {
+                int64_t sec = sector_num + i;
+                int64_t line = sec / IDE_CACHE_LINE_SECTORS;
+                int slot = (int)(line % IDE_CACHE_LINES);
+                if (bf->cache_tag[slot] == line) {
+                    memcpy(bf->cache + (size_t)slot * IDE_CACHE_LINE_BYTES +
+                           (sec % IDE_CACHE_LINE_SECTORS) * SECTOR_SIZE,
+                           buf + i * SECTOR_SIZE, SECTOR_SIZE);
+                }
+            }
+        }
+#endif
         fseeko(bf->f, bf->start_offset + sector_num * SECTOR_SIZE, SEEK_SET);
         fwrite(buf, 1, n * SECTOR_SIZE, bf->f);
+#ifdef BUILD_ESP32
+        fflush(bf->f);
+#endif
         ret = 0;
         break;
     case BF_MODE_SNAPSHOT:
@@ -2042,6 +2113,18 @@ static BlockDevice *block_device_init(const char *filename,
         memset(bf->sector_table, 0,
                sizeof(bf->sector_table[0]) * bf->nb_sectors);
     }
+#ifdef BUILD_ESP32
+    if (mode != BF_MODE_SNAPSHOT) {
+        bf->cache = (uint8_t*)heap_caps_malloc(IDE_CACHE_LINES * IDE_CACHE_LINE_BYTES, MALLOC_CAP_SPIRAM);
+        bf->cache_tag = (int64_t*)heap_caps_malloc(IDE_CACHE_LINES * sizeof(int64_t), MALLOC_CAP_SPIRAM);
+        if (bf->cache && bf->cache_tag) {
+            memset(bf->cache_tag, -1, IDE_CACHE_LINES * sizeof(int64_t));
+        } else {
+            bf->cache = NULL;
+            bf->cache_tag = NULL;
+        }
+    }
+#endif
     
     bs->opaque = bf;
     bs->get_sector_count = bf_get_sector_count;
@@ -2415,3 +2498,15 @@ void ide_fill_cmos(IDEIFState *s, void *cmos,
     }
     set(cmos, 0x12, d_0x12);
 }
+
+#ifdef BUILD_ESP32
+void ide_print_cache_stats(void)
+{
+    unsigned total = ide_cache_hits + ide_cache_misses;
+    if (total == 0) return;
+    int hit_pct = (ide_cache_hits * 100) / total;
+    printf("[perf] ide cache: %lu hits / %lu misses (%d%%) | reads: %lu ops, %lu sectors\n",
+           ide_cache_hits, ide_cache_misses, hit_pct,
+           ide_read_ops, ide_read_sectors);
+}
+#endif

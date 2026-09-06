@@ -5,27 +5,46 @@
  */
 
 #include <stdio.h>
+#include "../../ide.h"
 #include <inttypes.h>
+#include "../../ide.h"
 #include "sdkconfig.h"
+#include "../../ide.h"
 #include "freertos/FreeRTOS.h"
+#include "../../ide.h"
 #include "freertos/task.h"
+#include "../../ide.h"
 #include "esp_psram.h"
+#include "../../ide.h"
 #include "esp_partition.h"
+#include "../../ide.h"
 #include "driver/uart.h"
+#include "../../ide.h"
 #include "esp_vfs.h"
+#include "../../ide.h"
 #include "esp_vfs_fat.h"
+#include "../../ide.h"
 #include "esp_system.h"
+#include "../../ide.h"
 #include "esp_heap_caps.h"
+#include "../../ide.h"
 #include "esp_timer.h"
+#include "../../ide.h"
 #include "driver/ppa.h"
+#include "../../ide.h"
 #include "esp_cache.h"
+#include "../../ide.h"
 
 #include "../../ini.h"
+#include "../../ide.h"
 #include "../../pc.h"
+#include "../../ide.h"
 #include "common.h"
+#include "../../ide.h"
 
 //
 #include "esp_private/system_internal.h"
+#include "../../ide.h"
 uint32_t get_uticks()
 {
 	return esp_system_get_time();
@@ -333,9 +352,6 @@ static void display_task(void *arg)
 		static int64_t acc_mem = 0, acc_dr = 0;
 		static int64_t acc_cfg = 0, acc_ppa = 0, acc_edge = 0, acc_sync = 0, acc_wait = 0;
 		static int64_t last_log = 0;
-		acc_mem  += t1 - t0;
-		acc_cfg  += t_cfg;
-		acc_ppa  += t_ppa;
 		acc_edge += t_edge;
 		acc_sync += t_sync;
 		acc_wait += t_wait;
@@ -349,6 +365,9 @@ static void display_task(void *arg)
 				 (long)(acc_edge / fc), (long)(acc_sync / fc),
 				 (long)(acc_dr / fc));
 			fc = 0;
+#ifdef BUILD_ESP32
+			ide_print_cache_stats();
+#endif
 			acc_mem = acc_dr = 0;
 			acc_cfg = acc_ppa = acc_edge = acc_sync = acc_wait = 0;
 			last_log = t3;

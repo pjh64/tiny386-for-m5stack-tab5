@@ -54,3 +54,7 @@ PCIDevice *piix3_ide_init(PCIBus *pci_bus, int devfn);
 void ide_fill_cmos(IDEIFState *s, void *cmos,
                    uint8_t (*set)(void *cmos, int addr, uint8_t val));
 #endif /* IDE_H */
+
+#ifdef BUILD_ESP32
+void ide_print_cache_stats(void);
+#endif
