@@ -191,11 +191,19 @@ Console *console_init(int width, int height)
 		/* PSRAM-Heap ignoriert grosse Alignments -> manuell auf 64 aufrunden */
 		size_t sz = LCD_WIDTH * LCD_HEIGHT * 2;
 		uint8_t *raw = heap_caps_malloc(sz + 128, MALLOC_CAP_SPIRAM);
+		if (raw == NULL) {
+			fprintf(stderr, "FATAL: Cannot allocate rot_buf (%d bytes)\n", sz + 128);
+			abort();
+		}
 		rot_buf = (uint16_t *)(((uintptr_t)raw + 127) & ~(uintptr_t)127);
 	}
 	if (snap_buf == NULL) {
 		size_t sz = LCD_WIDTH * LCD_HEIGHT * 2;
 		uint8_t *raw = heap_caps_malloc(sz + 128, MALLOC_CAP_SPIRAM);
+		if (raw == NULL) {
+			fprintf(stderr, "FATAL: Cannot allocate snap_buf (%d bytes)\n", sz + 128);
+			abort();
+		}
 		snap_buf = (uint16_t *)(((uintptr_t)raw + 127) & ~(uintptr_t)127);
 	}
 	if (ppa_srm_handle == NULL) {
@@ -536,7 +544,7 @@ void app_main(void)
 #ifndef PSRAM_ALLOC_LEN
 	// use the whole psram
 	size_t len;
-	psram_len = 20 * 1024 * 1024;
+	psram_len = 26 * 1024 * 1024;
 	psram = heap_caps_calloc(1, psram_len, MALLOC_CAP_SPIRAM);
 	if (!psram) {  /* Fallback: kleiner */
 		psram_len = 12 * 1024 * 1024;
@@ -544,7 +552,7 @@ void app_main(void)
 	}
 	ESP_LOGW("MEM", "emulator PSRAM pool = %ld MB", psram_len / (1024*1024));
 #else
-	psram_len = 20 * 1024 * 1024;
+	psram_len = 26 * 1024 * 1024;
 	psram = heap_caps_calloc(1, psram_len, MALLOC_CAP_SPIRAM);
 	if (!psram) {  /* Fallback: kleiner */
 		psram_len = 12 * 1024 * 1024;
