@@ -16,6 +16,7 @@ void vga_set_force_8dm(VGAState *s, int v);
 
 int vga_step(VGAState *vga);
 int vga_is_idle(VGAState *vga);
+uint8_t *vga_get_fb(VGAState *s);
 void vga_refresh(VGAState *s,
                  SimpleFBDrawFunc *redraw_func, void *opaque, int full_update);
 

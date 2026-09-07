@@ -134,6 +134,8 @@ struct VGAState {
     uint8_t *vga_ram;
     int vga_ram_size;
     int dirty;  /* dirty flag for display updates */
+    int settle;  /* Frames, die nach Moduswechsel/full_update zusaetzlich refresht werden */
+    uint32_t last_ref;
     
     uint8_t sr_index;
     uint8_t sr[8];
@@ -1365,7 +1367,15 @@ int vga_is_idle(VGAState *s)
 void vga_refresh(VGAState *s,
                  SimpleFBDrawFunc *redraw_func, void *opaque, int full_update)
 {
-    if (!s->dirty && !full_update) return;
+    {
+        uint32_t now = get_uticks();
+        int periodic = (now - s->last_ref) >= 200000;  /* 5 fps Zwangsrefresh */
+        if (!s->dirty && !full_update && s->settle <= 0 && !periodic)
+            return;
+        s->last_ref = now;
+        if (s->settle > 0)
+            s->settle--;
+    }
     FBDevice *fb_dev = s->fb_dev;
     int graphic_mode;
     if (!(s->ar_index & 0x20)) {
@@ -1379,9 +1389,12 @@ void vga_refresh(VGAState *s,
         graphic_mode = 1;
     }
 
+    if (full_update)
+        s->settle = 30;
     if (graphic_mode != s->graphic_mode) {
         s->graphic_mode = graphic_mode;
         full_update = 1;
+        s->settle = 30;
         s->cursor_blink_time = get_uticks();
         simplefb_clear(fb_dev);
     }
@@ -2234,6 +2247,7 @@ VGAState *vga_init(char *vga_ram, int vga_ram_size,
     s->vbe_regs[VBE_DISPI_INDEX_VIDEO_MEMORY_64K] = s->vga_ram_size >> 16;
 
     vga_initmode(s);
+    s->settle = 30;
     return s;
 }
 
@@ -2593,4 +2607,9 @@ void vga_set_text_ops(VGAState *s, VGATextOps *ops, void *o)
 {
     s->vga_text_ops = ops;
     s->vga_text_obj = o;
+}
+
+uint8_t *vga_get_fb(VGAState *s)
+{
+    return s->fb_dev->fb_data;
 }

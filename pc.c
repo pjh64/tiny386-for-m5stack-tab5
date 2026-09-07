@@ -378,7 +378,7 @@ static u8 pc_io_read(void *o, int addr)
 		emulink_data_read_string(pc->emulink, &val, 1, 1);
 		return val;
 	default:
-		//fprintf(stderr, "in 0x%x <= 0x%x\n", addr, 0xff);
+// DISABLED_IO_DEBUG: 		//fprintf(stderr, "in 0x%x <= 0x%x\n", addr, 0xff);
 		return 0xff;
 	}
 }
@@ -413,7 +413,7 @@ static u16 pc_io_read16(void *o, int addr)
 	case 0x220:
 		return adlib_read(pc->adlib, addr);
 	default:
-		fprintf(stderr, "inw 0x%x <= 0x%x\n", addr, 0xffff);
+// DISABLED_IO_DEBUG: 		fprintf(stderr, "inw 0x%x <= 0x%x\n", addr, 0xffff);
 		return 0xffff;
 	}
 }
@@ -444,7 +444,7 @@ static u32 pc_io_read32(void *o, int addr)
 		val = emulink_status_read(pc->emulink);
 		return val;
 	default:
-		fprintf(stderr, "ind 0x%x <= 0x%x\n", addr, 0xffffffff);
+// DISABLED_IO_DEBUG: 		fprintf(stderr, "ind 0x%x <= 0x%x\n", addr, 0xffffffff);
 	}
 	return 0xffffffff;
 }
@@ -607,7 +607,7 @@ static void pc_io_write(void *o, int addr, u8 val)
 		emulink_data_write_string(pc->emulink, &val, 1, 1);
 		return;
 	default:
-		fprintf(stderr, "out 0x%x => 0x%x\n", val, addr);
+// DISABLED_IO_DEBUG: 		fprintf(stderr, "out 0x%x => 0x%x\n", val, addr);
 		return;
 	}
 }
@@ -646,7 +646,7 @@ static void pc_io_write16(void *o, int addr, u16 val)
 		ne2000_asic_ioport_write(pc->ne2000, addr, val);
 		return;
 	default:
-		fprintf(stderr, "outw 0x%x => 0x%x\n", val, addr);
+// DISABLED_IO_DEBUG: 		fprintf(stderr, "outw 0x%x => 0x%x\n", val, addr);
 		return;
 	}
 }
@@ -677,7 +677,7 @@ static void pc_io_write32(void *o, int addr, u32 val)
 		emulink_data_write(pc->emulink, val);
 		return;
 	default:
-		fprintf(stderr, "outd 0x%x => 0x%x\n", val, addr);
+// DISABLED_IO_DEBUG: 		fprintf(stderr, "outd 0x%x => 0x%x\n", val, addr);
 		return;
 	}
 }
@@ -697,12 +697,19 @@ static int pc_io_write_string(void *o, int addr, uint8_t *buf, int size, int cou
 }
 
 extern uint32_t get_uticks(void);
+int vga_fb_trylock(void);
+void vga_fb_unlock(void);
+void vga_snapshot_fb(const uint16_t *fb);
+uint8_t *vga_get_fb(VGAState *s);
 void pc_vga_step(void *o)
 {
 	PC *pc = o;
 	int refresh = vga_step(pc->vga);
 	if (refresh) {
 		uint32_t r0 = get_uticks();
+		static uint32_t last_conv = 0;
+		if (pc->full_update || (r0 - last_conv) >= 33000) {
+		last_conv = r0;
 		vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
 			    pc->full_update != 0);
 		uint32_t r1 = get_uticks();
@@ -711,6 +718,7 @@ void pc_vga_step(void *o)
 		if (r1 - rlast > 1000000) {
 			fprintf(stderr, "VGA_REFRESH avg us=%u (n=%d)\n", racc / rc, rc);
 			rc = 0; racc = 0; rlast = r1;
+		}
 		}
 		if (pc->full_update == 2)
 			pc->full_update = 0;

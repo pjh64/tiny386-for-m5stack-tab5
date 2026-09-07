@@ -122,9 +122,28 @@ typedef struct {
 #define NN 24
 
 static uint16_t *volatile disp_src = NULL;
+static SemaphoreHandle_t fb_lock = NULL;
+int vga_fb_trylock(void)
+{
+	if (!fb_lock)
+		return 1;
+	return xSemaphoreTake(fb_lock, 0) == pdTRUE;
+}
+void vga_fb_unlock(void)
+{
+	if (fb_lock)
+		xSemaphoreGive(fb_lock);
+}
 static TaskHandle_t disp_task_handle = NULL;
 static uint16_t *rot_buf = NULL;
 static uint16_t *snap_buf = NULL;
+void vga_snapshot_fb(const uint16_t *fb)
+{
+	for (int y = 0; y < 480; y++)
+		memcpy(snap_buf + (size_t)y * 720,
+		       fb + (size_t)(y + 120) * LCD_WIDTH + 280, 720 * 2);
+	esp_cache_msync(snap_buf, 720 * 480 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+}
 static ppa_client_handle_t ppa_srm_handle = NULL;
 static volatile bool g_no_rotate = false;
 static SemaphoreHandle_t ppa_done_sem = NULL;
@@ -187,6 +206,7 @@ Console *console_init(int width, int height)
 {
 	Console *c = malloc(sizeof(Console));
 	c->fb1 = fbmalloc(LCD_WIDTH * LCD_HEIGHT / NN * 2);
+	fb_lock = xSemaphoreCreateBinary();
 	if (rot_buf == NULL) {
 		/* PSRAM-Heap ignoriert grosse Alignments -> manuell auf 64 aufrunden */
 		size_t sz = LCD_WIDTH * LCD_HEIGHT * 2;
@@ -225,7 +245,7 @@ Console *console_init(int width, int height)
 		}
 	}
 	if (disp_task_handle == NULL)
-		xTaskCreatePinnedToCore(display_task, "display", 4096, NULL, 0,
+		xTaskCreatePinnedToCore(display_task, "display", 4096, NULL, 2,
 					&disp_task_handle, 0);
 
 	/* VGA rendert in eigenen Buffer (PPA-Input); die PPA schreibt
@@ -247,54 +267,64 @@ void display_toggle_rotate(void)
 
 static void display_task(void *arg)
 {
+	static int job_running = 0;
+	static int started = 0;
 	for (;;) {
-		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+		int64_t t_cfg = 0, t_ppa = 0, t_edge = 0, t_sync = 0, t_wait = 0;
+		int64_t t_ntfy = 0;
+		if (ppa_srm_handle && job_running) {
+			int64_t tw0 = esp_timer_get_time();
+			xSemaphoreTake(ppa_done_sem, portMAX_DELAY);
+			t_wait = esp_timer_get_time() - tw0;
+			job_running = 0;
+			uint16_t *ob = globals.panel_fb ? (uint16_t *)globals.panel_fb : rot_buf;
+			int64_t te0 = esp_timer_get_time();
+			memset(ob, 0, 2 * 720 * 2);
+			memset(ob + (1280 - 2) * 720, 0, 2 * 720 * 2);
+			int64_t te1 = esp_timer_get_time();
+			t_edge = te1 - te0;
+			esp_cache_msync(ob, 4 * 720 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+			esp_cache_msync(ob + (1280 - 4) * 720, 4 * 720 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+			t_sync = esp_timer_get_time() - te1;
+			if (!globals.panel_fb)
+				lcd_draw(0, 0, 720, 1280, rot_buf);
+		}
+		{
+			int64_t tn0 = esp_timer_get_time();
+			ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+			t_ntfy = esp_timer_get_time() - tn0;
+		}
 		uint16_t *src = disp_src;
 		uint16_t *out_buf = globals.panel_fb ? (uint16_t *)globals.panel_fb : rot_buf;
 		if (!src || !rot_buf || !snap_buf)
 			continue;
-
-		/* Kein Snapshot noetig: vga_task (schreibt fb) und display_task
-		 * (PPA) laufen beide auf Core 0 -> fb ist stabil waehrend PPA liest. */
 		int64_t t0 = esp_timer_get_time();
-		int64_t t1 = t0;   /* memcpy entfaellt */
-
-		int64_t t_cfg = 0, t_ppa = 0, t_edge = 0, t_sync = 0, t_wait = 0;
-
+		/* Sync-Snapshot des 720x480-Fensters: display_task laeuft gerade
+		 * (Core 0) -> vga_task kann src nicht gleichzeitig schreiben.
+		 * PPA liest danach NUR snap_buf -> kein Tearing. */
+		for (int y = 0; y < 480; y++)
+			memcpy(snap_buf + (size_t)y * 720,
+			       src + (size_t)(y + 120) * LCD_WIDTH + 280, 720 * 2);
+		esp_cache_msync(snap_buf, 720 * 480 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+		int64_t t1 = esp_timer_get_time();
 		if (ppa_srm_handle) {
-			/* PPA-Hardware: Rotation 270 + Skalierung in einem Durchlauf */
-			int64_t tw0 = esp_timer_get_time();
-			xSemaphoreTake(ppa_done_sem, portMAX_DELAY);
-			t_wait = esp_timer_get_time() - tw0;
-			int64_t tc0 = esp_timer_get_time();
 			ppa_srm_oper_config_t oper;
 			memset(&oper, 0, sizeof(oper));
-			oper.in.buffer  = src;
-			oper.in.pic_w   = LCD_WIDTH;    /* 1280 */
-			oper.in.pic_h   = LCD_HEIGHT;   /* 720 */
-
-			/* Wie alter STRETCH-Pfad:
-			 * Nimm den zentralen 720x480-Ausschnitt aus dem 1280x720 VGA-Framebuffer
-			 * und strecke ihn auf Vollbild. */
-			oper.in.block_offset_x = 280;
-			oper.in.block_offset_y = 120;
+			oper.in.buffer  = snap_buf;
+			oper.in.pic_w   = 720;
+			oper.in.pic_h   = 480;
+			oper.in.block_offset_x = 0;
+			oper.in.block_offset_y = 0;
 			oper.in.block_w = 720;
 			oper.in.block_h = 480;
 			oper.in.srm_cm  = PPA_SRM_COLOR_MODE_RGB565;
-
 			oper.out.buffer      = out_buf;
-			/* PPA erfordert: buffer_size muss aligned sein */
 			size_t raw_sz = LCD_WIDTH * LCD_HEIGHT * 2;
-			oper.out.buffer_size = (raw_sz + 127) & ~127;  /* auf 128 runden */
-			oper.out.pic_w       = LCD_HEIGHT;  /* 720 */
-			oper.out.pic_h       = LCD_WIDTH;   /* 1280 */
+			oper.out.buffer_size = (raw_sz + 127) & ~127;
+			oper.out.pic_w       = LCD_HEIGHT;
+			oper.out.pic_h       = LCD_WIDTH;
 			oper.out.srm_cm      = PPA_SRM_COLOR_MODE_RGB565;
-
-			/* Orientierung war mit 270 korrekt.
-			 * PPA skaliert vor der Rotation:
-			 * 720x480 -> 1280x720, danach Rotation -> 720x1280. */
 			if (g_no_rotate) {
-				/* BENCHMARK: keine Rotation, nur Skalierung */
 				oper.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
 				oper.scale_x = 1280.0f / 720.0f;
 				oper.scale_y = 1280.0f / 480.0f;
@@ -308,76 +338,58 @@ static void display_task(void *arg)
 			oper.mode = PPA_TRANS_MODE_NON_BLOCKING;
 			oper.user_data = ppa_done_sem;
 			int64_t tc1 = esp_timer_get_time();
-			t_cfg = tc1 - tc0;
-
+			t_cfg = tc1 - t1;
+			if (!started) {
+				started = 1;
+				while (xSemaphoreTake(ppa_done_sem, 0) == pdTRUE) { }
+			}
 			esp_err_t perr = ppa_do_scale_rotate_mirror(ppa_srm_handle, &oper);
-			int64_t tc2 = esp_timer_get_time();
-			t_ppa = tc2 - tc1;
-			if (perr != ESP_OK) {
-				xSemaphoreGive(ppa_done_sem);
+			t_ppa = esp_timer_get_time() - tc1;
+			if (perr == ESP_OK) {
+				job_running = 1;
+			} else {
 				static int ec = 0;
 				if (++ec <= 3)
 					ESP_LOGE("PPA", "srm failed: %s", esp_err_to_name(perr));
-				/* Fallback: Software */
 				for (int y = 0; y < LCD_HEIGHT; y++) {
-					const uint16_t *row = src + (size_t) y * LCD_WIDTH;
-					uint16_t *dst = rot_buf + y;
+					const uint16_t *row = src + (size_t)y * LCD_WIDTH;
+					uint16_t *dst = out_buf + y;
 					for (int x = 0; x < LCD_WIDTH; x++)
-						dst[(size_t) x * LCD_HEIGHT] = row[LCD_WIDTH - 1 - x];
+						dst[(size_t)x * LCD_HEIGHT] = row[LCD_WIDTH - 1 - x];
 				}
 			}
 		} else {
-			int64_t tc1 = esp_timer_get_time();
-			/* Fallback: Software */
 			for (int y = 0; y < LCD_HEIGHT; y++) {
-				const uint16_t *row = src + (size_t) y * LCD_WIDTH;
-				uint16_t *dst = rot_buf + y;
+				const uint16_t *row = src + (size_t)y * LCD_WIDTH;
+				uint16_t *dst = out_buf + y;
 				for (int x = 0; x < LCD_WIDTH; x++)
-					dst[(size_t) x * LCD_HEIGHT] = row[LCD_WIDTH - 1 - x];
+					dst[(size_t)x * LCD_HEIGHT] = row[LCD_WIDTH - 1 - x];
 			}
-			t_ppa = esp_timer_get_time() - tc1;
+			t_ppa = esp_timer_get_time() - t1;
 		}
-
-		/* Kanten-Artefakt der PPA-Rotation: aeusserste Zeilen schwarz */
-		int64_t te0 = esp_timer_get_time();
-		memset(out_buf, 0, 2 * 720 * 2);                      /* row 0..1  -> rechte Kante */
-		memset(out_buf + (1280 - 2) * 720, 0, 2 * 720 * 2);
-		memset(rot_buf, 0, 2 * 720 * 2);                      /* row 0..1  -> rechte Kante */
-		memset(rot_buf + (1280 - 2) * 720, 0, 2 * 720 * 2);   /* row last  -> linke Kante  */
-		int64_t te1 = esp_timer_get_time();
-		t_edge = te1 - te0;
-
-		esp_cache_msync(out_buf, 4 * 720 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
-		esp_cache_msync(out_buf + (1280 - 4) * 720, 4 * 720 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
-		int64_t t2 = esp_timer_get_time();
-		t_sync = t2 - te1;
-
-		if (!globals.panel_fb)
-			lcd_draw(0, 0, 720, 1280, rot_buf);
 		int64_t t3 = esp_timer_get_time();
-
 		static int fc = 0;
 		static int64_t acc_mem = 0, acc_dr = 0;
-		static int64_t acc_cfg = 0, acc_ppa = 0, acc_edge = 0, acc_sync = 0, acc_wait = 0;
+		static int64_t acc_cfg = 0, acc_ppa = 0, acc_edge = 0, acc_sync = 0, acc_wait = 0, acc_ntfy = 0;
 		static int64_t last_log = 0;
+		acc_mem += t1 - t0;
 		acc_edge += t_edge;
 		acc_sync += t_sync;
-		acc_wait += t_wait;
-		acc_dr   += t3 - t2;
+		acc_wait += t_wait; acc_ntfy += t_ntfy;
+		acc_dr   += t3 - t1;
 		fc++;
-		if (t3 - last_log > 1000000) {   /* 1x pro Sekunde */
+		if (t3 - last_log > 1000000) {
 			long tr = (long)((acc_cfg + acc_ppa + acc_edge + acc_sync) / fc);
-			ESP_LOGW("PERF", "disp fps=%d avg us: memcpy=%ld | tr=%ld [cfg=%ld ppa=%ld wait=%ld edge=%ld sync=%ld] | draw=%ld",
+			ESP_LOGW("PERF", "disp fps=%d avg us: memcpy=%ld | tr=%ld [cfg=%ld ppa=%ld wait=%ld ntfy=%ld edge=%ld sync=%ld] | draw=%ld",
 				 fc, (long)(acc_mem / fc), tr,
-				 (long)(acc_cfg / fc), (long)(acc_ppa / fc), (long)(acc_wait / fc),
-				 (long)(acc_edge / fc), (long)(acc_sync / fc),
+				 (long)(acc_cfg / fc), (long)(acc_ppa / fc), (long)(acc_wait / fc), (long)(acc_ntfy / fc), (long)(acc_edge / fc), (long)(acc_sync / fc),
 				 (long)(acc_dr / fc));
 			fc = 0;
 #ifdef BUILD_ESP32
 			ide_print_cache_stats();
 #endif
 			acc_mem = acc_dr = 0;
-			acc_cfg = acc_ppa = acc_edge = acc_sync = acc_wait = 0;
+			acc_cfg = acc_ppa = acc_edge = acc_sync = acc_wait = acc_ntfy = 0;
 			last_log = t3;
 		}
 	}
@@ -585,6 +597,6 @@ void app_main(void)
 
 	if (psram) {
 		xTaskCreatePinnedToCore(i386_task, "i386_main", 4096, &config, 3, NULL, 1);
-		xTaskCreatePinnedToCore(vga_task, "vga_task", 4096, NULL, 0, NULL, 0);
+		xTaskCreatePinnedToCore(vga_task, "vga_task", 4096, NULL, 2, NULL, 0);
 	}
 }
