@@ -133,6 +133,7 @@ struct VGAState {
 
     uint8_t *vga_ram;
     int vga_ram_size;
+    int dirty;  /* dirty flag for display updates */
     
     uint8_t sr_index;
     uint8_t sr[8];
@@ -1014,6 +1015,7 @@ static void vga_text_refresh(VGAState *s,
     }
 #endif
     redraw_func(opaque, 0, 0, fb_dev->width, fb_dev->height);
+    s->dirty = 0;
 }
 
 static void vga_graphic_refresh(VGAState *s,
@@ -1328,6 +1330,7 @@ static void vga_graphic_refresh(VGAState *s,
 #endif
     }
     redraw_func(opaque, 0, 0, fb_dev->width, fb_dev->height);
+    s->dirty = 0;
 }
 
 int vga_step(VGAState *s)
@@ -1362,6 +1365,7 @@ int vga_is_idle(VGAState *s)
 void vga_refresh(VGAState *s,
                  SimpleFBDrawFunc *redraw_func, void *opaque, int full_update)
 {
+    if (!s->dirty && !full_update) return;
     FBDevice *fb_dev = s->fb_dev;
     int graphic_mode;
     if (!(s->ar_index & 0x20)) {
@@ -1599,6 +1603,7 @@ void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
             memcpy(&s->palette[s->dac_write_index * 3], s->dac_cache, 3);
             s->dac_sub_index = 0;
             s->dac_write_index++;
+            s->dirty = 1;
         }
         break;
     case 0x3ce:
@@ -1679,6 +1684,7 @@ static void vga_write_ ## base(void *opaque, uint32_t addr, uint32_t val, int si
 
 void vbe_write(VGAState *s, uint32_t offset, uint32_t val)
 {
+    s->dirty = 1;
     if (offset == 0) {
         s->vbe_index = val;
     } else {
@@ -2016,6 +2022,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
         mask = (1 << plane);
         if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
             s->vga_ram[addr] = val;
+            s->dirty = 1;
 #ifdef DEBUG_VGA_MEM
             printf("vga: chain4: [0x" TARGET_FMT_plx "]\n", addr);
 #endif
@@ -2032,6 +2039,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
                 return;
             }
             s->vga_ram[addr] = val;
+            s->dirty = 1;
             if (s->vga_text_ops && s->graphic_mode == 1 && !s->term_refresh) {
                 int width = (s->cr[0x01] + 1);
                 uint32_t start_addr = s->cr[0x0d] | (s->cr[0x0c] << 8);
@@ -2110,6 +2118,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
         val = (val & bit_mask) | (s->latch & ~bit_mask);
 
     do_write:
+        s->dirty = 1;
         /* mask data according to sr[2] */
         mask = s->sr[VGA_SEQ_PLANE_WRITE];
 //        s->plane_updated |= mask; /* only used to detect font change */
