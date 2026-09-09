@@ -66,7 +66,7 @@ static void vga_draw_8bpp_planar_fast(
 #ifdef BUILD_ESP32
 #include "esp_attr.h"
 void *pcmalloc(long size);
-#define RETRACE_INTERVAL_US 5000
+#define RETRACE_INTERVAL_US 14286  /* FIX: 70 Hz wie VGA-Mode 0x0D/0x13; war ~150 Hz -> Page-Flip-Flackern */
 #else
 #define IRAM_ATTR
 #define pcmalloc malloc
@@ -1063,8 +1063,9 @@ static void vga_graphic_refresh(VGAState *s,
         update_palette16(s, palette);
         if (s->sr[0x01] & 8) {
             xdiv = 2;
-            if (shift_control == 1) // XXX
-                w *= 2;
+            /* FIX: Dot-Clock-Divide bedeutet 2 Screen-Dots pro VRAM-Pixel -
+             * gilt auch fuer planare Modi (0x0D/0x0E), sonst halbe Breite. */
+            w *= 2;
         }
     } else {
         if (!vbe_enabled(s)) {
@@ -1146,6 +1147,7 @@ static void vga_graphic_refresh(VGAState *s,
         w = wx;
 #endif
     uint32_t plane_mask = s->ar[0x12];
+
     for (int y = 0; y < h; y++) {
         uint32_t addr = addr1;
         if (!(s->cr[0x17] & 1)) {

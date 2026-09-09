@@ -270,7 +270,7 @@ void i8254_update_irq(PITState *pit)
 	uint32_t uticks = get_uticks();
 	PITChannelState *s = pit->channels;
 	uint32_t d = ((uint64_t) (uticks - s->count_load_time)) * PIT_FREQ / 1000000;
-	switch(s->mode) {
+	switch(s->mode & 0x3) { /* BCD-Flag (Bit 0) ignorieren: Mode 4-7 -> 0-3 */
 	case 2:
 	case 3:
 		if (s->last_irq_count + s->count - d >= 0x80000000) {
@@ -285,8 +285,16 @@ void i8254_update_irq(PITState *pit)
 			}
 		}
 		break;
-	default:
-		abort();
+	case 0: /* Interrupt on Terminal Count: einmalig ausloesen */
+		if (d >= s->count && s->last_irq_count < s->count) {
+			if (s->irq != -1) {
+				pit->set_irq(pit->pic, s->irq, 1);
+				s->last_irq_count = s->count;
+			}
+		}
+		break;
+	default: /* Mode 1 u.a.: nicht periodisch - ignorieren statt abort() */
+		break;
 	}
 }
 
