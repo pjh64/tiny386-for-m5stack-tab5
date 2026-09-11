@@ -687,6 +687,15 @@ static void iomem_write32(void *iomem, uword addr, u32 val)
 	vga_mem_write32(pc->vga, addr - 0xa0000, val);
 }
 
+#if defined(USE_AMD64)
+static void iomem_write64(void *iomem, uword addr, u64 val)
+{
+	PC *pc = iomem;
+	vga_mem_write32(pc->vga, addr - 0xa0000, val);
+	vga_mem_write32(pc->vga, addr + 4 - 0xa0000, val >> 32);
+}
+#endif
+
 static bool iomem_write_string(void *iomem, uword addr, uint8_t *buf, int len)
 {
 	PC *pc = iomem;
@@ -820,6 +829,9 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void *redraw_data,
 	cb->iomem_read32 = iomem_read32;
 	cb->iomem_write32 = iomem_write32;
 	cb->iomem_write_string = iomem_write_string;
+#if defined(USE_AMD64)
+	cb->iomem_write64 = iomem_write64;
+#endif
 
 	pc->redraw = redraw;
 	pc->redraw_data = redraw_data;

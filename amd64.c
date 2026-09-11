@@ -97,6 +97,10 @@ struct CPUAMD64 {
 	struct {
 		u32 vendor[3];
 	} cpuid;
+
+#ifdef AMD64_ENABLE_LEG32
+	void *cpui386;
+#endif
 };
 
 #define dolog(...) fprintf(stderr, __VA_ARGS__)
@@ -4244,12 +4248,21 @@ static bool pmret(CPUAMD64 *cpu, bool opsz16, int rex, int off, bool isiret)
 	return true;
 }
 
+#ifdef AMD64_ENABLE_LEG32
+#include "amd64_leg32.inc"
+#endif
+
 void cpuamd64_step(CPUAMD64 *cpu, int stepcount)
 {
+#ifdef AMD64_ENABLE_LEG32
+	if (leg32_step(cpu, stepcount))
+		return;
+#endif
 	if ((cpu->flags & IF) && cpu->intr) {
 		cpu->intr = false;
 		cpu->halt = false;
 		int no = cpu->cb.pic_read_irq(cpu->cb.pic);
+
 		cpu->ip = cpu->next_ip;
 		TRY1(call_isr(cpu, no, false, 1));
 	}
@@ -4311,6 +4324,10 @@ uword cpu_getflags(CPUAMD64 *cpu)
 
 void cpuamd64_reset(CPUAMD64 *cpu)
 {
+#ifdef AMD64_ENABLE_LEG32
+	if (leg32_reset(cpu))
+		return;
+#endif
 	for (int i = 0; i < 16; i++) {
 		REGi(i) = 0;
 	}
@@ -4352,6 +4369,9 @@ void cpuamd64_reset(CPUAMD64 *cpu)
 
 void cpuamd64_reset_pm(CPUAMD64 *cpu, uint32_t start_addr)
 {
+#ifdef AMD64_ENABLE_LEG32
+	leg32_free(cpu);
+#endif
 	cpuamd64_reset(cpu);
 	cpu->cr0 = 1;
 	cpu->seg[SEG_CS].sel = 0x8;
@@ -4364,11 +4384,19 @@ void cpuamd64_reset_pm(CPUAMD64 *cpu, uint32_t start_addr)
 
 void IRAM_ATTR cpuamd64_raise_irq(CPUAMD64 *cpu)
 {
+#ifdef AMD64_ENABLE_LEG32
+	if (leg32_raise_irq(cpu))
+		return;
+#endif
 	cpu->intr = true;
 }
 
 void cpuamd64_set_gpr(CPUAMD64 *cpu, int i, u32 val)
 {
+#ifdef AMD64_ENABLE_LEG32
+	if (leg32_set_gpr(cpu, i, val))
+		return;
+#endif
 	sreg32(i, val);
 }
 
@@ -4407,6 +4435,9 @@ CPUAMD64 *cpuamd64_new(int _, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 	cpu->cpuid.vendor[1] = CPUID_VENDOR1;
 	cpu->cpuid.vendor[2] = CPUID_VENDOR2;
 
+#ifdef AMD64_ENABLE_LEG32
+	leg32_init(cpu);
+#endif
 	cpuamd64_reset(cpu);
 
 	memset(&(cpu->cb), 0, sizeof(CPU_CB));
@@ -4418,6 +4449,9 @@ CPUAMD64 *cpuamd64_new(int _, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 
 void cpuamd64_delete(CPUAMD64 *cpu)
 {
+#ifdef AMD64_ENABLE_LEG32
+	leg32_free(cpu);
+#endif
 	fpu_delete(cpu->fpu);
 	free(cpu->tlb.tab);
 	free(cpu);

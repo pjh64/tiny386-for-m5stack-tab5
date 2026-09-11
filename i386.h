@@ -1,6 +1,7 @@
 #ifndef I386_H
 #define I386_H
 
+#ifndef I386_IN_AMD64
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -14,6 +15,7 @@ typedef int8_t s8;
 
 typedef u32 uword;
 typedef s32 sword;
+#endif
 
 typedef struct CPUI386 CPUI386;
 
@@ -41,6 +43,21 @@ typedef struct {
 	bool (*iomem_write_string)(void *, uword, uint8_t *, int);
 } CPU_CB;
 
+typedef struct {
+	u32 gpr[8];
+	u32 seg[8];
+	u32 ip;
+	u32 flags;
+	u32 gdt_base, gdt_limit;
+	u32 idt_base, idt_limit;
+	u32 cr0, cr2, cr3;
+	uint64_t efer;
+	// TODO: fpu state...
+} CPUI386_State;
+
+void cpui386_get_state(CPUI386 *cpu, CPUI386_State *state);
+int cpui386_get_excno(CPUI386 *cpu);
+
 CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb);
 void cpui386_delete(CPUI386 *cpu);
 void cpui386_enable_fpu(CPUI386 *cpu);
@@ -51,6 +68,7 @@ void cpui386_raise_irq(CPUI386 *cpu);
 void cpui386_set_gpr(CPUI386 *cpu, int i, u32 val);
 long cpui386_get_cycle(CPUI386 *cpu);
 
+#ifndef I386_IN_AMD64
 bool cpu_load8(CPUI386 *cpu, int seg, uword addr, u8 *res);
 bool cpu_store8(CPUI386 *cpu, int seg, uword addr, u8 val);
 bool cpu_load16(CPUI386 *cpu, int seg, uword addr, u16 *res);
@@ -63,5 +81,6 @@ void cpu_setexc(CPUI386 *cpu, int excno, uword excerr);
 void cpu_setflags(CPUI386 *cpu, uword set_mask, uword clear_mask);
 uword cpu_getflags(CPUI386 *cpu);
 void cpu_abort(CPUI386 *cpu, int code);
+#endif
 
 #endif /* I386_H */
