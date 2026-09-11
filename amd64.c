@@ -3102,6 +3102,16 @@ static bool call_isr(CPUAMD64 *cpu, int no, bool pusherr, int ext);
 		if (lreg64(1) == 0) cpu->next_ip += d; \
 	}
 
+#define LOOPb(i, li, _) \
+	sword d = sext8(li(i)); \
+	if (adsz32) { \
+		sreg32(1, lreg32(1) - 1); \
+		if (lreg32(1)) cpu->next_ip += d; \
+	} else { \
+		sreg64(1, lreg64(1) - 1); \
+		if (lreg64(1)) cpu->next_ip += d; \
+	}
+
 #define COND() \
 	int cond; \
 	switch(b1 & 0xf) { \
@@ -3359,6 +3369,15 @@ static bool check_ioperm(CPUAMD64 *cpu, int port, int bit)
 
 #define WAIT() \
 	if ((cpu->cr0 & 0xa) == 0xa) THROW0(EX_NM);
+
+#define XLAT() \
+	if (adsz32) { \
+		addr = lreg32(3) + lreg8(0); \
+	} else { \
+		addr = lreg64(3) + lreg8(0); \
+	} \
+	TRY(translate8(cpu, &meml, 1, curr_seg, addr)); \
+	sreg8(0, laddr8(&meml));
 
 #define GvMa GvM
 #define BOUND_helper(BIT, a, b, la, sa, lb, sb) \
@@ -3632,7 +3651,7 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUAMD64 *cpu, int stepcount)
 	f0x06: f0x07: f0x0e: f0x16: f0x17: f0x1e: f0x1f: \
 	f0x27: f0x2f: f0x37: f0x3f: f0x60: f0x61: f0x62: \
 	f0x82: f0x9a: f0xc4: f0xc5: f0xc8: f0xce: f0xd4: \
-	f0xd5: f0xd6: f0xd7: f0xe0: f0xe1: f0xe2: \
+	f0xd5: f0xd6: /*f0xd7:*/ f0xe0: f0xe1: /*f0xe2:*/ \
 	f0xea: f0xf1
 #define default_ud THROW0(EX_UD)
 #undef CX
