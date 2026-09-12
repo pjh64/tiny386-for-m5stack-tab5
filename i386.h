@@ -15,6 +15,10 @@ typedef int8_t s8;
 
 typedef u32 uword;
 typedef s32 sword;
+#else
+#define CPU_CB CPUI386_CB
+#define uword u32
+#define sword s32
 #endif
 
 typedef struct CPUI386 CPUI386;
@@ -81,6 +85,10 @@ void cpu_setexc(CPUI386 *cpu, int excno, uword excerr);
 void cpu_setflags(CPUI386 *cpu, uword set_mask, uword clear_mask);
 uword cpu_getflags(CPUI386 *cpu);
 void cpu_abort(CPUI386 *cpu, int code);
+#else
+#undef CPU_CB
+#undef uword
+#undef sword
 #endif
 
 #endif /* I386_H */

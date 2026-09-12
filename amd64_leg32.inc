@@ -1,7 +1,5 @@
 #define I386_IN_AMD64
-#define CPU_CB CPUI386_CB
 #include "i386.h"
-#undef CPU_CB
 
 static int relay_pic_read_irq(void *o)
 {
@@ -57,43 +55,43 @@ static int relay_io_write_string(void *o, int port, uint8_t *buf, int size, int 
 	return cb->io_write_string(cb->io, port, buf, size, count);
 }
 
-static u8 relay_iomem_read8(void *o, uword port)
+static u8 relay_iomem_read8(void *o, u32 port)
 {
 	CPU_CB *cb = o;
 	return cb->iomem_read8(cb->iomem, port);
 }
 
-static void relay_iomem_write8(void *o, uword port, u8 val)
+static void relay_iomem_write8(void *o, u32 port, u8 val)
 {
 	CPU_CB *cb = o;
 	cb->iomem_write8(cb->iomem, port, val);
 }
 
-static u16 relay_iomem_read16(void *o, uword port)
+static u16 relay_iomem_read16(void *o, u32 port)
 {
 	CPU_CB *cb = o;
 	return cb->iomem_read16(cb->iomem, port);
 }
 
-static void relay_iomem_write16(void *o, uword port, u16 val)
+static void relay_iomem_write16(void *o, u32 port, u16 val)
 {
 	CPU_CB *cb = o;
 	cb->iomem_write16(cb->iomem, port, val);
 }
 
-static u32 relay_iomem_read32(void *o, uword port)
+static u32 relay_iomem_read32(void *o, u32 port)
 {
 	CPU_CB *cb = o;
 	return cb->iomem_read32(cb->iomem, port);
 }
 
-static void relay_iomem_write32(void *o, uword port, u32 val)
+static void relay_iomem_write32(void *o, u32 port, u32 val)
 {
 	CPU_CB *cb = o;
 	cb->iomem_write32(cb->iomem, port, val);
 }
 
-static bool relay_iomem_write_string(void *o, uword port, uint8_t *buf, int len)
+static bool relay_iomem_write_string(void *o, u32 port, uint8_t *buf, int len)
 {
 	CPU_CB *cb = o;
 	return cb->iomem_write_string(cb->iomem, port, buf, len);
