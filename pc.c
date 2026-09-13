@@ -56,6 +56,16 @@ static CPUABS *cpu_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 		cpu->enable_fpu = NULL;
 		cpu->_raise_irq = raise_irq_kvm;
 	} else {
+#if defined(USE_AMD64)
+		cpu->cpu = cpuamd64_new(gen, phys_mem, phys_mem_size, cb);
+		cpu->reset = (void *) cpuamd64_reset;
+		cpu->reset_pm = (void *) cpuamd64_reset_pm;
+		cpu->set_gpr = (void *) cpuamd64_set_gpr;
+		cpu->step = (void *) cpuamd64_step;
+		cpu->register_mem = NULL;
+		cpu->enable_fpu = NULL;
+		cpu->_raise_irq = raise_irq_amd64;
+#else
 		cpu->cpu = cpui386_new(gen, phys_mem, phys_mem_size, cb);
 		cpu->reset = (void *) cpui386_reset;
 		cpu->reset_pm = (void *) cpui386_reset_pm;
@@ -64,6 +74,7 @@ static CPUABS *cpu_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 		cpu->register_mem = NULL;
 		cpu->enable_fpu = (void *) cpui386_enable_fpu;
 		cpu->_raise_irq = raise_irq_i386;
+#endif
 	}
 	return cpu;
 }
@@ -522,7 +533,9 @@ static void pc_io_write(void *o, int addr, u8 val)
 		fflush(stdout);
 		return;
 	case 0x92:
-		pc->port92 = val;
+		if (val & 1)
+			pc->reset_request = 1;
+		pc->port92 = val & ~1;
 		return;
 	case 0x60:
 		kbd_write_data(pc->i8042, addr, val);
@@ -845,6 +858,21 @@ static void iomem_write32(void *iomem, uword addr, u32 val)
 	vga_mem_write32(pc->vga, addr - 0xa0000, val);
 }
 
+#if defined(USE_AMD64)
+static u64 iomem_read64(void *iomem, uword addr)
+{
+	return iomem_read32(iomem, addr) |
+		((u64) iomem_read32(iomem, addr + 4) << 32);
+}
+
+static void iomem_write64(void *iomem, uword addr, u64 val)
+{
+	PC *pc = iomem;
+	vga_mem_write32(pc->vga, addr - 0xa0000, val);
+	vga_mem_write32(pc->vga, addr + 4 - 0xa0000, val >> 32);
+}
+#endif
+
 static bool iomem_write_string(void *iomem, uword addr, uint8_t *buf, int len)
 {
 	PC *pc = iomem;
@@ -881,7 +909,12 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void *redraw_data,
 		cpu_enable_fpu(pc->cpu);
 #if defined(USE_AMD64)
 	if (conf->cpuid_vendor) {
+#if defined(USE_CPUABS)
+		if (conf->cpu_gen >= 0)
+			cpuamd64_set_vendor(pc->cpu->cpu, conf->cpuid_vendor);
+#else
 		cpuamd64_set_vendor(pc->cpu, conf->cpuid_vendor);
+#endif
 	}
 #endif
 	pc->bios = conf->bios;
@@ -978,6 +1011,10 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void *redraw_data,
 	cb->iomem_read32 = iomem_read32;
 	cb->iomem_write32 = iomem_write32;
 	cb->iomem_write_string = iomem_write_string;
+#if defined(USE_AMD64)
+	cb->iomem_read64 = iomem_read64;
+	cb->iomem_write64 = iomem_write64;
+#endif
 
 	pc->redraw = redraw;
 	pc->redraw_data = redraw_data;

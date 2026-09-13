@@ -161,6 +161,25 @@ struct CPUI386 {
 	struct {
 		uword cs, eip, esp;
 	} sysenter;
+
+#ifdef AMD64_ENABLE_LEG32
+	struct {
+		u32 efer;
+	} lm;
+#define INIT_LM_EFER(cpu) ((cpu)->lm.efer = 0)
+#define GET_LM_EFER(cpu) ((cpu)->lm.efer)
+#define SET_LM_EFER(cpu, x) ((cpu)->lm.efer = (x))
+#define CPUID_LM0_2 0x2048
+#define CPUID_LM80_0 0x80000004
+#define CPUID_LM81_2 ((1<<29) | (1<<11))
+#else
+#define INIT_LM_EFER(cpu)
+#define GET_LM_EFER(cpu) 0
+#define SET_LM_EFER(cpu, x) THROW(EX_GP, 0)
+#define CPUID_LM0_2 0
+#define CPUID_LM80_0 0
+#define CPUID_LM81_2 0
+#endif
 };
 
 #define dolog(...) fprintf(stderr, __VA_ARGS__)
@@ -605,6 +624,15 @@ static int pte_lookup[2][4][2][2] = { //[wp != 0][(pte >> 1) & 3][cpl > 0][rwm >
 
 static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgno)
 {
+	if (unlikely(GET_LM_EFER(cpu))) {
+		static u8 _[8];
+		ent->lpgno = lpgno;
+		ent->xaddr = 0;
+		ent->pte_lookup = pte_lookup[1][3];
+		ent->ppte = _;
+		return true;
+	}
+
 	uword base_addr = cpu->cr3 & ~0xfff;
 	uword i = lpgno >> 10;
 	uword j = lpgno & 1023;
@@ -1173,6 +1201,12 @@ static bool set_seg(CPUI386 *cpu, int seg, int sel)
 	if (seg == SEG_CS) {
 //		if ((sel & 3) != cpu->cpl)
 //			dolog("set_seg: PVL %d => %d\n", cpu->cpl, sel & 3);
+#ifdef AMD64_ENABLE_LEG32
+		// go to long mode
+		if (w2 & (1<< 21)) {
+			THROW(0x8664, 0);
+		}
+#endif
 		cpu->cpl = sel & 3;
 		cpu->code16 = !(cpu->seg[SEG_CS].flags & SEG_D_BIT);
 	}
@@ -3831,6 +3865,19 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 			REGi(2) |= CPUID_SIMD_FEATURE; \
 			REGi(1) |= CPUID_SIMD_FEATURE2; \
 		} \
+		REGi(2) |= CPUID_LM0_2; \
+		break; \
+	case 0x80000000: \
+		REGi(0) = CPUID_LM80_0; \
+		REGi(3) = 0; \
+		REGi(2) = 0; \
+		REGi(1) = 0; \
+		break; \
+	case 0x80000001: \
+		REGi(0) = 0; \
+		REGi(3) = 0; \
+		REGi(2) = CPUID_LM81_2; \
+		REGi(1) = 1; \
 		break; \
 	default: \
 		REGi(0) = 0; \
@@ -3886,6 +3933,7 @@ static uint64_t get_nticks()
 	case 0x174: cpu->sysenter.cs = REGi(0); break; \
 	case 0x176: cpu->sysenter.eip = REGi(0); break; \
 	case 0x175: cpu->sysenter.esp = REGi(0); break; \
+	case 0xc0000080: SET_LM_EFER(cpu,REGi(0) & ~(1<<10)); break; \
 	default: cpu_debug(cpu); THROW(EX_GP, 0); \
 	}
 
@@ -3895,6 +3943,7 @@ static uint64_t get_nticks()
 	case 0x174: REGi(0) = cpu->sysenter.cs; REGi(2) = 0; break; \
 	case 0x176: REGi(0) = cpu->sysenter.eip; REGi(2) = 0; break; \
 	case 0x175: REGi(0) = cpu->sysenter.esp; REGi(2) = 0; break; \
+	case 0xc0000080: REGi(0) = GET_LM_EFER(cpu); REGi(2) = 0; break; \
 	default: cpu_debug(cpu); THROW(EX_GP, 0); \
 	}
 
@@ -4409,7 +4458,15 @@ static bool pmcall(CPUI386 *cpu, bool opsz16, uword addr, int sel, bool isjmp)
 		}
 //		if ((sel & 3) != cpu->cpl)
 //			dolog("pmcall PVL %d => %d\n", cpu->cpl, sel & 3);
-		TRY1(set_seg(cpu, SEG_CS, sel));
+		if (!set_seg(cpu, SEG_CS, sel)) {
+#ifdef AMD64_ENABLE_LEG32
+			if (cpu->excno == 0x8664) {
+				cpu->ip = addr;
+				return false;
+			}
+#endif
+			TRY1(false);
+		}
 		cpu->next_ip = addr;
 	} else {
 		int newcs = w1 >> 16;
@@ -5061,7 +5118,18 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 //			dolog("pmiret PVL %d => %d %04x:%08x\n", cpu->cpl, newcs & 3, newcs, newip);
 			if (isiret)
 				cpu->flags = newflags;
-			TRY1(set_seg(cpu, SEG_CS, newcs));
+			if (!set_seg(cpu, SEG_CS, newcs)) {
+#ifdef AMD64_ENABLE_LEG32
+				if (cpu->excno == 0x8664) {
+					cpu->ip = newip;
+					set_sp(sp + 8 + off, sp_mask);
+					if (isiret)
+						cpu->cc.mask = 0;
+					return false;
+				}
+#endif
+				TRY1(false);
+			}
 
 			if (opsz16) {
 				set_sp(sp + 4 + off, sp_mask);
@@ -5122,6 +5190,10 @@ void cpui386_step(CPUI386 *cpu, int stepcount)
 	int ret = cpu_exec1(cpu, stepcount);
 	cpu->ifetch.paddr = 0;
 	if (!ret) {
+#ifdef AMD64_ENABLE_LEG32
+		if (cpu->excno == 0x8664)
+			return;
+#endif
 		bool pusherr = false;
 		switch (cpu->excno) {
 		case EX_DF: case EX_TS: case EX_NP: case EX_SS: case EX_GP:
@@ -5208,10 +5280,13 @@ void cpui386_reset(CPUI386 *cpu)
 
 	cpu->cc.mask = 0;
 	tlb_clear(cpu);
+	cpu->excno = 0;
+	cpu->excerr = 0;
 
 	cpu->sysenter.cs = 0;
 	cpu->sysenter.eip = 0;
 	cpu->sysenter.esp = 0;
+	INIT_LM_EFER(cpu);
 }
 
 void cpui386_reset_pm(CPUI386 *cpu, uint32_t start_addr)
@@ -5305,6 +5380,30 @@ void cpui386_delete(CPUI386 *cpu)
 	free(cpu->tlb.tab);
 #endif
 	free(cpu);
+}
+
+void cpui386_get_state(CPUI386 *cpu, CPUI386_State *state)
+{
+	refresh_flags(cpu);
+	for (int i = 0; i < 8; i++)
+		state->gpr[i] = REGi(i);
+	for (int i = 0; i < 8; i++)
+		state->seg[i] = cpu->seg[i].sel;
+	state->ip = cpu->ip;
+	state->flags = cpu->flags;
+	state->gdt_base = cpu->gdt.base;
+	state->gdt_limit = cpu->gdt.limit;
+	state->idt_base = cpu->idt.base;
+	state->idt_limit = cpu->idt.limit;
+	state->cr0 = cpu->cr0;
+	state->cr2 = cpu->cr2;
+	state->cr3 = cpu->cr3;
+	state->efer = GET_LM_EFER(cpu);
+}
+
+int cpui386_get_excno(CPUI386 *cpu)
+{
+	return cpu->excno;
 }
 
 #if !defined(_WIN32) && !defined(__wasm__)

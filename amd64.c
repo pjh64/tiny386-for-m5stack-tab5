@@ -97,6 +97,10 @@ struct CPUAMD64 {
 	struct {
 		u32 vendor[3];
 	} cpuid;
+
+#ifdef AMD64_ENABLE_LEG32
+	void *cpui386;
+#endif
 };
 
 #define dolog(...) fprintf(stderr, __VA_ARGS__)
@@ -3098,6 +3102,16 @@ static bool call_isr(CPUAMD64 *cpu, int no, bool pusherr, int ext);
 		if (lreg64(1) == 0) cpu->next_ip += d; \
 	}
 
+#define LOOPb(i, li, _) \
+	sword d = sext8(li(i)); \
+	if (adsz32) { \
+		sreg32(1, lreg32(1) - 1); \
+		if (lreg32(1)) cpu->next_ip += d; \
+	} else { \
+		sreg64(1, lreg64(1) - 1); \
+		if (lreg64(1)) cpu->next_ip += d; \
+	}
+
 #define COND() \
 	int cond; \
 	switch(b1 & 0xf) { \
@@ -3355,6 +3369,15 @@ static bool check_ioperm(CPUAMD64 *cpu, int port, int bit)
 
 #define WAIT() \
 	if ((cpu->cr0 & 0xa) == 0xa) THROW0(EX_NM);
+
+#define XLAT() \
+	if (adsz32) { \
+		addr = lreg32(3) + lreg8(0); \
+	} else { \
+		addr = lreg64(3) + lreg8(0); \
+	} \
+	TRY(translate8(cpu, &meml, 1, curr_seg, addr)); \
+	sreg8(0, laddr8(&meml));
 
 #define GvMa GvM
 #define BOUND_helper(BIT, a, b, la, sa, lb, sb) \
@@ -3628,7 +3651,7 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUAMD64 *cpu, int stepcount)
 	f0x06: f0x07: f0x0e: f0x16: f0x17: f0x1e: f0x1f: \
 	f0x27: f0x2f: f0x37: f0x3f: f0x60: f0x61: f0x62: \
 	f0x82: f0x9a: f0xc4: f0xc5: f0xc8: f0xce: f0xd4: \
-	f0xd5: f0xd6: f0xd7: f0xe0: f0xe1: f0xe2: \
+	f0xd5: f0xd6: /*f0xd7:*/ f0xe0: f0xe1: /*f0xe2:*/ \
 	f0xea: f0xf1
 #define default_ud THROW0(EX_UD)
 #undef CX
@@ -4244,12 +4267,21 @@ static bool pmret(CPUAMD64 *cpu, bool opsz16, int rex, int off, bool isiret)
 	return true;
 }
 
+#ifdef AMD64_ENABLE_LEG32
+#include "amd64_leg32.inc"
+#endif
+
 void cpuamd64_step(CPUAMD64 *cpu, int stepcount)
 {
+#ifdef AMD64_ENABLE_LEG32
+	if (leg32_step(cpu, stepcount))
+		return;
+#endif
 	if ((cpu->flags & IF) && cpu->intr) {
 		cpu->intr = false;
 		cpu->halt = false;
 		int no = cpu->cb.pic_read_irq(cpu->cb.pic);
+
 		cpu->ip = cpu->next_ip;
 		TRY1(call_isr(cpu, no, false, 1));
 	}
@@ -4311,6 +4343,9 @@ uword cpu_getflags(CPUAMD64 *cpu)
 
 void cpuamd64_reset(CPUAMD64 *cpu)
 {
+#ifdef AMD64_ENABLE_LEG32
+	leg32_reset(cpu);
+#endif
 	for (int i = 0; i < 16; i++) {
 		REGi(i) = 0;
 	}
@@ -4353,6 +4388,9 @@ void cpuamd64_reset(CPUAMD64 *cpu)
 void cpuamd64_reset_pm(CPUAMD64 *cpu, uint32_t start_addr)
 {
 	cpuamd64_reset(cpu);
+#ifdef AMD64_ENABLE_LEG32
+	leg32_free(cpu);
+#endif
 	cpu->cr0 = 1;
 	cpu->seg[SEG_CS].sel = 0x8;
 	cpu->next_ip = start_addr;
@@ -4364,11 +4402,19 @@ void cpuamd64_reset_pm(CPUAMD64 *cpu, uint32_t start_addr)
 
 void IRAM_ATTR cpuamd64_raise_irq(CPUAMD64 *cpu)
 {
+#ifdef AMD64_ENABLE_LEG32
+	if (leg32_raise_irq(cpu))
+		return;
+#endif
 	cpu->intr = true;
 }
 
 void cpuamd64_set_gpr(CPUAMD64 *cpu, int i, u32 val)
 {
+#ifdef AMD64_ENABLE_LEG32
+	if (leg32_set_gpr(cpu, i, val))
+		return;
+#endif
 	sreg32(i, val);
 }
 
@@ -4389,6 +4435,7 @@ void cpuamd64_set_vendor(CPUAMD64 *cpu, const char *p)
 CPUAMD64 *cpuamd64_new(int _, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 {
 	CPUAMD64 *cpu = malloc(sizeof(CPUAMD64));
+	memset(cpu, 0, sizeof(CPUAMD64));
 	cpu->flags_mask = EFLAGS_MASK_586;
 
 	cpu->tlb.size = tlb_size;
@@ -4409,7 +4456,6 @@ CPUAMD64 *cpuamd64_new(int _, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 
 	cpuamd64_reset(cpu);
 
-	memset(&(cpu->cb), 0, sizeof(CPU_CB));
 	if (cb)
 		*cb = &(cpu->cb);
 
@@ -4418,6 +4464,9 @@ CPUAMD64 *cpuamd64_new(int _, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 
 void cpuamd64_delete(CPUAMD64 *cpu)
 {
+#ifdef AMD64_ENABLE_LEG32
+	leg32_free(cpu);
+#endif
 	fpu_delete(cpu->fpu);
 	free(cpu->tlb.tab);
 	free(cpu);

@@ -2,6 +2,12 @@ Q = @
 CC_ = gcc
 CC_win32 = i686-w64-mingw32-gcc
 CC = ${CC_${PLAT}}
+LD_ = ld
+LD_win32 = i686-w64-mingw32-ld
+LD = ${LD_${PLAT}}
+OBJCOPY_ = objcopy
+OBJCOPY_win32 = i686-w64-mingw32-objcopy
+OBJCOPY = ${OBJCOPY_${PLAT}}
 HOSTCC = ${CC}
 
 SDL_CONFIG = sdl-config
@@ -91,11 +97,13 @@ CFLAGS += ${CFLAGS_${ENABLE_CISO}}
 LIBS += ${LIBS_${ENABLE_CISO}}
 SRCS += ${SRCS_${ENABLE_CISO}}
 
-#USE_AMD64 = n/y
+#USE_AMD64 = n/y/full
 USE_AMD64 = n
 CFLAGS_AMD64_y = -DUSE_AMD64
-SRCS_AMD64_y = amd64.c
-SRCS_AMD64_n = i386.c
+CFLAGS_AMD64_full = -DUSE_AMD64 -DAMD64_ENABLE_LEG32
+SRCS_AMD64_n = i386.c fpu.c
+SRCS_AMD64_y = amd64.c fpu.c
+SRCS_AMD64_full = amd64-comb.o i386-comb.o
 CFLAGS += ${CFLAGS_AMD64_${USE_AMD64}}
 SRCS += ${SRCS_AMD64_${USE_AMD64}}
 
@@ -103,7 +111,7 @@ PROGS_ = tiny386 tiny386_headless wifikbd initnet
 PROGS_win32 = tiny386 tiny386_headless wifikbd
 PROGS = ${PROGS_${PLAT}}
 
-SRCS += ini.c fpu.c i8259.c i8254.c ide.c vga.c i8042.c misc.c adlib.c ne2000.c i8257.c sb16.c pcspk.c
+SRCS += ini.c i8259.c i8254.c ide.c vga.c i8042.c misc.c adlib.c ne2000.c i8257.c sb16.c pcspk.c
 SRCS += ${FMOPL_${USE_FMOPL}}
 SRCS += ${CPUABS_${USE_CPUABS}}
 SRCS += pc.c
@@ -127,12 +135,30 @@ win32:
 	make -C . PLAT=win32
 
 clean:
-	rm -f ${OBJS} .depends ${PROGS}
+	rm -f ${OBJS} i386.o amd64.o fpu.o amd64-comb.o i386-comb.o fpu-leg32.o i386-leg32.o .depends ${PROGS}
 
 prepare: fmopl.inc
 
 fmopl.inc: fmopl.c
 	${HOSTCC} -DGENTABLE $^$> -o fmoplgen -lm && ./fmoplgen > $@ && rm -f ./fmoplgen
+
+fpu-leg32.o: fpu.c
+	@/bin/echo -e " \e[1;32mCC\e[0m\t\e[1;37m$<\e[0m \e[1;32m->\e[0m \e[1;37m$@\e[0m"
+	${Q}${CC} ${CFLAGS} -UUSE_AMD64 -c $< -o $@
+
+i386-leg32.o: i386.c
+	@/bin/echo -e " \e[1;32mCC\e[0m\t\e[1;37m$<\e[0m \e[1;32m->\e[0m \e[1;37m$@\e[0m"
+	${Q}${CC} ${CFLAGS} -UUSE_AMD64 -c $< -o $@
+
+i386-comb.o: i386-leg32.o fpu-leg32.o
+	@/bin/echo -e " \e[1;32mLD\e[0m\t\e[1;37m$^$>\e[0m \e[1;32m->\e[0m \e[1;37m$@\e[0m"
+	${Q}${LD} -r -o $@ $^$>
+	${Q}${OBJCOPY} --localize-hidden --keep-global-symbols=i386_syms.txt $@
+
+amd64-comb.o: amd64.o fpu.o
+	@/bin/echo -e " \e[1;32mLD\e[0m\t\e[1;37m$^$>\e[0m \e[1;32m->\e[0m \e[1;37m$@\e[0m"
+	${Q}${LD} -r -o $@ $^$>
+	${Q}${OBJCOPY} --localize-hidden --keep-global-symbols=amd64_syms.txt $@
 
 tiny386${SUFF_SDL}: sdl/main.c ${OBJS}
 	@/bin/echo -e " \e[1;32mCCLD\e[0m\t\e[1;32m->\e[0m \e[1;37m$@\e[0m"
