@@ -5201,6 +5201,8 @@ void cpui386_reset(CPUI386 *cpu)
 
 	cpu->cc.mask = 0;
 	tlb_clear(cpu);
+	cpu->excno = 0;
+	cpu->excerr = 0;
 
 	cpu->sysenter.cs = 0;
 	cpu->sysenter.eip = 0;

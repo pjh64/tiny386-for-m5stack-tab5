@@ -132,13 +132,12 @@ static void leg32_free(CPUAMD64 *cpu)
 	}
 }
 
-static bool leg32_reset(CPUAMD64 *cpu)
+static void leg32_reset(CPUAMD64 *cpu)
 {
-	if (cpu->cpui386) {
-		cpui386_reset(cpu->cpui386);
-		return true;
+	if (!cpu->cpui386) {
+		leg32_init(cpu);
 	}
-	return false;
+	cpui386_reset(cpu->cpui386);
 }
 
 static bool IRAM_ATTR leg32_raise_irq(CPUAMD64 *cpu)
@@ -167,9 +166,7 @@ static bool leg32_step(CPUAMD64 *cpu, int stepcount)
 		if (cpui386_get_excno(cpu->cpui386) == 0x8664) {
 			CPUI386_State state;
 			cpui386_get_state(cpu->cpui386, &state);
-			cpui386_delete(cpu->cpui386);
-			cpu->cpui386 = NULL;
-			cpuamd64_reset(cpu);
+			leg32_free(cpu);
 			for (int i = 0; i < 8; i++)
 				REGi(i) = state.gpr[i];
 			for (int i = 0; i < 8; i++)

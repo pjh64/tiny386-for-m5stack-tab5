@@ -404,7 +404,9 @@ static void pc_io_write(void *o, int addr, u8 val)
 		fflush(stdout);
 		return;
 	case 0x92:
-		pc->port92 = val;
+		if (val & 1)
+			pc->reset_request = 1;
+		pc->port92 = val & ~1;
 		return;
 	case 0x60:
 		kbd_write_data(pc->i8042, addr, val);

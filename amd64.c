@@ -4344,8 +4344,7 @@ uword cpu_getflags(CPUAMD64 *cpu)
 void cpuamd64_reset(CPUAMD64 *cpu)
 {
 #ifdef AMD64_ENABLE_LEG32
-	if (leg32_reset(cpu))
-		return;
+	leg32_reset(cpu);
 #endif
 	for (int i = 0; i < 16; i++) {
 		REGi(i) = 0;
@@ -4388,10 +4387,10 @@ void cpuamd64_reset(CPUAMD64 *cpu)
 
 void cpuamd64_reset_pm(CPUAMD64 *cpu, uint32_t start_addr)
 {
+	cpuamd64_reset(cpu);
 #ifdef AMD64_ENABLE_LEG32
 	leg32_free(cpu);
 #endif
-	cpuamd64_reset(cpu);
 	cpu->cr0 = 1;
 	cpu->seg[SEG_CS].sel = 0x8;
 	cpu->next_ip = start_addr;
@@ -4436,6 +4435,7 @@ void cpuamd64_set_vendor(CPUAMD64 *cpu, const char *p)
 CPUAMD64 *cpuamd64_new(int _, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 {
 	CPUAMD64 *cpu = malloc(sizeof(CPUAMD64));
+	memset(cpu, 0, sizeof(CPUAMD64));
 	cpu->flags_mask = EFLAGS_MASK_586;
 
 	cpu->tlb.size = tlb_size;
@@ -4454,12 +4454,8 @@ CPUAMD64 *cpuamd64_new(int _, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 	cpu->cpuid.vendor[1] = CPUID_VENDOR1;
 	cpu->cpuid.vendor[2] = CPUID_VENDOR2;
 
-#ifdef AMD64_ENABLE_LEG32
-	leg32_init(cpu);
-#endif
 	cpuamd64_reset(cpu);
 
-	memset(&(cpu->cb), 0, sizeof(CPU_CB));
 	if (cb)
 		*cb = &(cpu->cb);
 
