@@ -114,14 +114,16 @@ struct CPUI386 {
 #define INIT_LM_EFER(cpu) ((cpu)->lm.efer = 0)
 #define GET_LM_EFER(cpu) ((cpu)->lm.efer)
 #define SET_LM_EFER(cpu, x) ((cpu)->lm.efer = (x))
-#define CPUID_LM0_0 0x80000004
-#define CPUID_LM1_2 ((1<<29) | (1<<11))
+#define CPUID_LM0_2 0x2048
+#define CPUID_LM80_0 0x80000004
+#define CPUID_LM81_2 ((1<<29) | (1<<11))
 #else
 #define INIT_LM_EFER(cpu)
 #define GET_LM_EFER(cpu) 0
 #define SET_LM_EFER(cpu, x) THROW(EX_GP, 0)
-#define CPUID_LM0_0 0
-#define CPUID_LM1_2 0
+#define CPUID_LM0_2 0
+#define CPUID_LM80_0 0
+#define CPUID_LM81_2 0
 #endif
 };
 
@@ -3808,9 +3810,10 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 			REGi(2) |= CPUID_SIMD_FEATURE; \
 			REGi(1) |= CPUID_SIMD_FEATURE2; \
 		} \
+		REGi(2) |= CPUID_LM0_2; \
 		break; \
 	case 0x80000000: \
-		REGi(0) = CPUID_LM0_0; \
+		REGi(0) = CPUID_LM80_0; \
 		REGi(3) = 0; \
 		REGi(2) = 0; \
 		REGi(1) = 0; \
@@ -3818,7 +3821,7 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 	case 0x80000001: \
 		REGi(0) = 0; \
 		REGi(3) = 0; \
-		REGi(2) = CPUID_LM1_2; \
+		REGi(2) = CPUID_LM81_2; \
 		REGi(1) = 1; \
 		break; \
 	default: \
@@ -5050,7 +5053,18 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 //			dolog("pmiret PVL %d => %d %04x:%08x\n", cpu->cpl, newcs & 3, newcs, newip);
 			if (isiret)
 				cpu->flags = newflags;
-			TRY1(set_seg(cpu, SEG_CS, newcs));
+			if (!set_seg(cpu, SEG_CS, newcs)) {
+#ifdef AMD64_ENABLE_LEG32
+				if (cpu->excno == 0x8664) {
+					cpu->ip = newip;
+					set_sp(sp + 8 + off, sp_mask);
+					if (isiret)
+						cpu->cc.mask = 0;
+					return false;
+				}
+#endif
+				TRY1(false);
+			}
 
 			if (opsz16) {
 				set_sp(sp + 4 + off, sp_mask);
