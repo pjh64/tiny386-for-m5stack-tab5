@@ -20,6 +20,7 @@
 #include "driver/ledc.h"
 #include "esp_cpu.h"
 #include "common.h"
+#include "touch_test.h"
 
 extern void pc_vga_step(void *pc);
 extern int pc_vga_idle(void *pc);
@@ -394,6 +395,7 @@ void vga_task(void *arg)
     }
     
     ESP_LOGI(TAG, "=== DISPLAY FULLY INITIALIZED ===");
+    touch_test_init();
 
     globals.panel = panel;
     
@@ -412,6 +414,13 @@ void vga_task(void *arg)
         }
         if (pc_vga_idle(globals.pc)) vTaskDelay(1);
     }
+}
+
+
+/* Getter für I2C-Bus (für Touch-Treiber) */
+i2c_master_bus_handle_t tab5_get_i2c_bus(void)
+{
+    return s_i2c_bus;
 }
 
 #endif /* USE_LCD_M5STACK_TAB5 */

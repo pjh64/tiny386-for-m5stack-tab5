@@ -1,4 +1,5 @@
 idf_component_register(SRCS "esp_main.c"
+    "touch_test.c"
 "../../adlib.c"
 "../../fmopl.c"
 "../../fpu.c"
