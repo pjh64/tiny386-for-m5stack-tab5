@@ -1,178 +1,177 @@
-#include <unistd.h>
+#include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2s_std.h"
+#include "driver/i2c_master.h"
+#include "es8388.h"
+#include "board_m5stack_tab5.h"
 #include "common.h"
 
-static i2s_chan_handle_t                tx_chan;        // I2S tx channel handler
-void mixer_callback (void *opaque, uint8_t *stream, int free);
+extern i2c_master_bus_handle_t tab5_get_i2c_bus(void);
+extern void mixer_callback(void *opaque, uint8_t *stream, int free);
 
-#ifndef MIXER_BUF_LEN
-#define MIXER_BUF_LEN 128
-#endif
+static void i2s_task(void *arg);
+
+static i2s_chan_handle_t tx_chan = NULL;
+static bool audio_active = false;
+
+static StaticTask_t i2s_task_tcb;
+static StackType_t *i2s_task_stack = NULL;
+
+void i2s_main(void)
+{
+    fprintf(stderr, "I2S: Creating I2S task\n");
+    
+    i2s_task_stack = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM);
+    if (!i2s_task_stack) {
+        fprintf(stderr, "I2S: Failed to allocate task stack in PSRAM\n");
+        return;
+    }
+    
+    xTaskCreateStaticPinnedToCore(
+        i2s_task,
+        "i2s_task",
+        2048,
+        NULL,
+        5,
+        i2s_task_stack,
+        &i2s_task_tcb,
+        0
+    );
+}
 
 static void i2s_task(void *arg)
 {
-	int16_t buf[MIXER_BUF_LEN];
-	int core_id = esp_cpu_get_core_id();
-	fprintf(stderr, "i2s runs on core %d\n", core_id);
+    fprintf(stderr, "I2S: Task running on core %d (priority 5)\n", esp_cpu_get_core_id());
+    
+    xEventGroupWaitBits(global_event_group, BIT0, pdFALSE, pdFALSE, portMAX_DELAY);
+    fprintf(stderr, "I2S: Emulator ready\n");
+    
+    i2c_master_bus_handle_t bus = NULL;
+    int retries = 0;
+    while (bus == NULL && retries < 100) {
+        bus = tab5_get_i2c_bus();
+        if (bus == NULL) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            retries++;
+        }
+    }
+    
+    if (bus == NULL) {
+        fprintf(stderr, "I2S: ERROR - I2C bus not available!\n");
+        vTaskDelete(NULL);
+        return;
+    }
+    fprintf(stderr, "I2S: Got I2C bus after %d retries\n", retries);
+    
+    esp_err_t codec_ret = es8388_init(bus);
+    if (codec_ret != ESP_OK) {
+        fprintf(stderr, "I2S: WARNING - ES8388 init failed: %s\n", esp_err_to_name(codec_ret));
+    } else {
+        fprintf(stderr, "I2S: ES8388 initialized\n");
+        es8388_mute(1);
+        speaker_enable(0);
+    }
+    
+    /* Audio buffer in PSRAM */
+    int16_t *buf = heap_caps_malloc(MIXER_BUF_LEN * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (buf == NULL) {
+        fprintf(stderr, "I2S: Failed to allocate mixer buffer\n");
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    /* ABSOLUTE MINIMUM DMA: 2x64 frames = 512 bytes total
+     * This is the smallest config that still produces audio */
+    i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
+    tx_chan_cfg.auto_clear = true;
+    tx_chan_cfg.dma_desc_num = 2;      /* Absolute minimum */
+    tx_chan_cfg.dma_frame_num = 64;    /* Absolute minimum */
+    
+    int chan_retries = 0;
+    while (chan_retries < 60) {
+        if (i2s_new_channel(&tx_chan_cfg, &tx_chan, NULL) == ESP_OK) {
+            fprintf(stderr, "I2S: Channel created (2x64 frames = 512B DMA)\n");
+            break;
+        }
+        chan_retries++;
+        fprintf(stderr, "I2S: DMA alloc failed, retry %d/60...\n", chan_retries);
+        vTaskDelay(pdMS_TO_TICKS(1000));  /* Longer wait between retries */
+    }
+    
+    if (tx_chan == NULL) {
+        fprintf(stderr, "I2S: Failed to create channel\n");
+        heap_caps_free(buf);
+        vTaskDelete(NULL);
+        return;
+    }
 
-	xEventGroupWaitBits(global_event_group,
-			    BIT0,
-			    pdFALSE,
-			    pdFALSE,
-			    portMAX_DELAY);
+    i2s_std_config_t tx_std_cfg = {
+        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(44100),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = I2S_MCLK,
+            .bclk = I2S_BCLK,
+            .ws   = I2S_WS,
+            .dout = I2S_DOUT,
+            .din  = -1,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv   = false,
+            },
+        },
+    };
 
-	i2s_channel_enable(tx_chan);
-	for (;;) {
-		size_t bwritten;
-		memset(buf, 0, MIXER_BUF_LEN * 2);
-		mixer_callback(globals.pc, (uint8_t *) buf, MIXER_BUF_LEN * 2);
-		for (int i = 0; i < MIXER_BUF_LEN; i++) {
-			buf[i] = buf[i] / 16;
-		}
-		i2s_channel_write(tx_chan, buf, MIXER_BUF_LEN * 2, &bwritten, portMAX_DELAY);
-	}
-	i2s_channel_disable(tx_chan);
-}
+    int init_retries = 0;
+    while (init_retries < 60) {
+        if (i2s_channel_init_std_mode(tx_chan, &tx_std_cfg) == ESP_OK) {
+            fprintf(stderr, "I2S: Channel initialized\n");
+            break;
+        }
+        init_retries++;
+        fprintf(stderr, "I2S: Channel init failed, retry %d/60...\n", init_retries);
+        vTaskDelay(pdMS_TO_TICKS(1000));  /* Longer wait between retries */
+    }
+    
+    if (init_retries >= 60) {
+        fprintf(stderr, "I2S: Failed to init channel after 60 retries\n");
+        i2s_del_channel(tx_chan);
+        heap_caps_free(buf);
+        vTaskDelete(NULL);
+        return;
+    }
 
-#ifndef I2S_NUM
-#define I2S_NUM I2S_NUM_AUTO
-#endif
+    i2s_channel_enable(tx_chan);
+    fprintf(stderr, "I2S: Starting audio loop\n");
 
-#ifdef USE_ES8311
-// adapted from: examples/peripherals/i2s/i2s_codec/i2s_es8311/main/i2s_es8311_example.c
-static i2s_chan_handle_t                rx_chan;        // I2S rx channel handler (not used)
-#include "esp_log.h"
-#include "driver/i2c_master.h"
-#include "esp_codec_dev_defaults.h"
-#include "esp_codec_dev.h"
-#include "esp_codec_dev_vol.h"
-static const char *TAG = "i2s";
-
-static esp_err_t es8311_codec_init(void)
-{
-	/* Initialize I2C peripheral */
-	i2c_master_bus_handle_t i2c_bus_handle = NULL;
-	i2c_master_bus_config_t i2c_mst_cfg = {
-		.i2c_port = ES8311_I2C_NUM,
-		.sda_io_num = ES8311_I2C_SDA,
-		.scl_io_num = ES8311_I2C_SCL,
-		.clk_source = I2C_CLK_SRC_DEFAULT,
-		.glitch_ignore_cnt = 7,
-		/* Pull-up internally for no external pull-up case.
-		   Suggest to use external pull-up to ensure a strong enough pull-up. */
-		.flags.enable_internal_pullup = true,
-	};
-	ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_cfg, &i2c_bus_handle));
-
-	/* Create control interface with I2C bus handle */
-	audio_codec_i2c_cfg_t i2c_cfg = {
-		.port = ES8311_I2C_NUM,
-		.addr = ES8311_CODEC_DEFAULT_ADDR,
-		.bus_handle = i2c_bus_handle,
-	};
-	const audio_codec_ctrl_if_t *ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
-	assert(ctrl_if);
-
-	/* Create data interface with I2S bus handle */
-	audio_codec_i2s_cfg_t i2s_cfg = {
-		.port = I2S_NUM,
-		.rx_handle = rx_chan,
-		.tx_handle = tx_chan,
-	};
-	const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&i2s_cfg);
-	assert(data_if);
-
-	/* Create ES8311 interface handle */
-	const audio_codec_gpio_if_t *gpio_if = audio_codec_new_gpio();
-	assert(gpio_if);
-	es8311_codec_cfg_t es8311_cfg = {
-		.ctrl_if = ctrl_if,
-		.gpio_if = gpio_if,
-		.codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH,
-		.master_mode = false,
-		.use_mclk = I2S_MCLK >= 0,
-		.pa_pin = ES8311_PA,
-		.pa_reverted = false,
-		.hw_gain = {
-			.pa_voltage = 5.0,
-			.codec_dac_voltage = 3.3,
-		},
-		//.mclk_div = EXAMPLE_MCLK_MULTIPLE,
-	};
-	const audio_codec_if_t *es8311_if = es8311_codec_new(&es8311_cfg);
-	assert(es8311_if);
-
-	/* Create the top codec handle with ES8311 interface handle and data interface */
-	esp_codec_dev_cfg_t dev_cfg = {
-		.dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
-		.codec_if = es8311_if,
-		.data_if = data_if,
-	};
-	esp_codec_dev_handle_t codec_handle = esp_codec_dev_new(&dev_cfg);
-	assert(codec_handle);
-
-	/* Specify the sample configurations and open the device */
-	esp_codec_dev_sample_info_t sample_cfg = {
-		.bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT,
-		.channel = 2,
-		.channel_mask = 0x03,
-		.sample_rate = 44100,
-	};
-	if (esp_codec_dev_open(codec_handle, &sample_cfg) != ESP_CODEC_DEV_OK) {
-		ESP_LOGE(TAG, "Open codec device failed");
-		return ESP_FAIL;
-	}
-
-	/* Set the initial volume and gain */
-	if (esp_codec_dev_set_out_vol(codec_handle, 80) != ESP_CODEC_DEV_OK) {
-		ESP_LOGE(TAG, "set output volume failed");
-		return ESP_FAIL;
-	}
-	return ESP_OK;
-}
-#endif
-
-void i2s_main()
-{
-#ifdef I2S_MCLK
-	/* Setp 1: Determine the I2S channel configuration and allocate two channels one by one
-	 * The default configuration can be generated by the helper macro,
-	 * it only requires the I2S controller id and I2S role
-	 * The tx and rx channels here are registered on different I2S controller,
-	 * Except ESP32 and ESP32-S2, others allow to register two separate tx & rx channels on a same controller */
-	i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM, I2S_ROLE_MASTER);
-#ifdef USE_ES8311
-	ESP_ERROR_CHECK(i2s_new_channel(&tx_chan_cfg, &tx_chan, &rx_chan));
-#else
-	ESP_ERROR_CHECK(i2s_new_channel(&tx_chan_cfg, &tx_chan, NULL));
-#endif
-	/* Step 2: Setting the configurations of standard mode and initialize each channels one by one
-	 * The slot configuration and clock configuration can be generated by the macros
-	 * These two helper macros is defined in 'i2s_std.h' which can only be used in STD mode.
-	 * They can help to specify the slot and clock configurations for initialization or re-configuring */
-	i2s_std_config_t tx_std_cfg = {
-		.clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(44100),
-		.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
-		.gpio_cfg = {
-			.mclk = I2S_MCLK,
-			.bclk = I2S_BCLK,
-			.ws   = I2S_WS,
-			.dout = I2S_DOUT,
-			.din  = -1,
-			.invert_flags = {
-				.mclk_inv = false,
-				.bclk_inv = false,
-				.ws_inv   = false,
-			},
-		},
-	};
-	ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_chan, &tx_std_cfg));
-#ifdef USE_ES8311
-	ESP_ERROR_CHECK(es8311_codec_init());
-#endif
-	xTaskCreatePinnedToCore(i2s_task, "i2s_task", 4096, NULL, 0, NULL, 0);
-#endif
+    int loop_count = 0;
+    for (;;) {
+        size_t bwritten;
+        memset(buf, 0, MIXER_BUF_LEN * sizeof(int16_t));
+        mixer_callback(globals.pc, (uint8_t *) buf, MIXER_BUF_LEN * sizeof(int16_t));
+        
+        int32_t peak = 0;
+        for (int i = 0; i < MIXER_BUF_LEN; i++) {
+            int32_t s = buf[i];
+            if (s < 0) s = -s;
+            if (s > peak) peak = s;
+        }
+        
+        if (peak > 100 && !audio_active) {
+            fprintf(stderr, "I2S: Audio detected (peak=%" PRId32 "), enabling codec\n", peak);
+            speaker_enable(1);
+            es8388_mute(0);
+            audio_active = true;
+        }
+        
+        i2s_channel_write(tx_chan, buf, MIXER_BUF_LEN * sizeof(int16_t), &bwritten, portMAX_DELAY);
+        
+        if (++loop_count % 100 == 0) {
+            fprintf(stderr, "I2S: Loop %d, peak=%" PRId32 ", active=%d\n", 
+                    loop_count, peak, audio_active);
+        }
+    }
 }

@@ -13,22 +13,20 @@
 #define LCD_WIDTH  1280
 #define LCD_HEIGHT 720
 
-// SD card (Tab5 pinout)
-// No hosted WiFi for now (ESP32-C6 co-processor needs extra setup)
+// Audio: ES8388 codec on Tab5
+#define USE_ES8388
+#define I2S_MCLK  30
+#define I2S_BCLK  27
+#define I2S_WS    29
+#define I2S_DOUT  26
+#define PI4IO1_I2C_ADDR  0x43
 
-// Audio: DISABLED — Tab5 uses ES8388+ES7210 (not ES8311)
-// Removing USE_ES8311 prevents the bootloop assert in i2s.c
-// #define USE_ES8311
-
-#define MIXER_BUF_LEN 512
-
-// WiFi disabled - Tab5 uses ESP32-C6 co-processor (not yet supported)
+#define MIXER_BUF_LEN 1024
 
 /* Tab5: SD slot power rail (official BSP uses LDO_VO4 = channel 4) */
 #define SD_PWR_CTRL_LDO_IO_ID 4
 
-/* Tab5 SD card in SPI mode (proven working by M5Tab-Macintosh).
- * SCK=43 MOSI=44 MISO=39 CS=42 */
+/* Tab5 SD card in SPI mode */
 #define SD_SPI_SCK   43
 #define SD_SPI_MOSI  44
 #define SD_SPI_MISO  39
@@ -38,6 +36,3 @@
 /* I2C pins used by storage.c SPI-branch pre-init (harmless on Tab5) */
 #define LCD_I2C_SDA  31
 #define LCD_I2C_SCL  32
-
-
-

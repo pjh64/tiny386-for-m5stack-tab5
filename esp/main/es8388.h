@@ -5,5 +5,7 @@
 #include "driver/i2c_master.h"
 
 esp_err_t es8388_init(i2c_master_bus_handle_t i2c_bus);
+void speaker_enable(int enable);
+void es8388_mute(int mute);
 
 #endif /* ES8388_H */
