@@ -27,11 +27,19 @@
 #define SD_PWR_CTRL_LDO_IO_ID 4
 
 /* Tab5 SD card in SPI mode */
-#define SD_SPI_SCK   43
-#define SD_SPI_MOSI  44
-#define SD_SPI_MISO  39
-#define SD_SPI_CS    42
-#define SD_SPI_FREQ_KHZ 20000
+/* #define SD_SPI_SCK   43 */
+/* #define SD_SPI_MOSI  44 */
+/* #define SD_SPI_MISO  39 */
+/* #define SD_SPI_CS    42 */
+/* #define SD_SPI_FREQ_KHZ 20000 */
+
+/* SDIO mode pins - M5Stack Tab5 microSD (25x faster than SPI) */
+#define SD_CLK       43
+#define SD_CMD       44
+#define SD_D0        39
+#define SD_D1        40
+#define SD_D2        41
+#define SD_D3        42
 
 /* I2C pins used by storage.c SPI-branch pre-init (harmless on Tab5) */
 #define LCD_I2C_SDA  31

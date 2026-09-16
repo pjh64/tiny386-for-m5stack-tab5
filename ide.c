@@ -39,9 +39,10 @@ unsigned long ide_read_ops;
 unsigned long ide_read_sectors;
 unsigned long ide_cache_hits, ide_cache_misses;
 
-#define IDE_CACHE_LINE_SECTORS 8                    /* 4 KB */
-#define IDE_CACHE_LINES        512                  /* 2 MB total */
+#define IDE_CACHE_LINE_SECTORS 32                    /* 4 KB */
+#define IDE_CACHE_LINES        32                  /* 2 MB total */
 #define IDE_CACHE_LINE_BYTES   (IDE_CACHE_LINE_SECTORS * 512)
+#define IDE_PREFETCH_SECTORS     32                  /* 64 KB prefetch buffer */
 #endif
 //#define DEBUG_IDE
 //#define DEBUG_IDE_ATAPI
@@ -1917,6 +1918,11 @@ typedef struct BlockDeviceFile {
 #ifdef BUILD_ESP32
     uint8_t *cache;             /* IDE_CACHE_LINES * IDE_CACHE_LINE_BYTES */
     int64_t *cache_tag;         /* line number held, or -1 */
+    uint8_t *prefetch_buf;      /* IDE_PREFETCH_SECTORS * SECTOR_SIZE */
+    int64_t prefetch_start;     /* First sector in prefetch buffer */
+    int64_t prefetch_end;       /* Last sector in prefetch buffer + 1 */
+    int64_t last_sector;        /* Last accessed sector for sequence detection */
+    int sequential_count;       /* Count of sequential reads */
 #endif
 } BlockDeviceFile;
 
@@ -1936,6 +1942,42 @@ static int bf_get_chs(BlockDevice *bs, int *cylinders, int *heads, int *sectors)
 }
 
 //#define DUMP_BLOCK_READ
+
+
+#ifdef BUILD_ESP32
+static void ide_prefetch_sectors(BlockDeviceFile *bf, int64_t start_sector, int count)
+{
+    if (count > IDE_PREFETCH_SECTORS) {
+        count = IDE_PREFETCH_SECTORS;
+    }
+    
+    int64_t t0 = esp_timer_get_time();
+    fseeko(bf->f, bf->start_offset + start_sector * SECTOR_SIZE, SEEK_SET);
+    size_t got = fread(bf->prefetch_buf, 1, count * SECTOR_SIZE, bf->f);
+    
+    if (got < (size_t)(count * SECTOR_SIZE)) {
+        memset(bf->prefetch_buf + got, 0, count * SECTOR_SIZE - got);
+    }
+    
+    bf->prefetch_start = start_sector;
+    bf->prefetch_end = start_sector + count;
+    ide_read_us += esp_timer_get_time() - t0;
+    ide_read_ops++;
+    ide_read_sectors += count;
+}
+
+static int ide_try_prefetch_read(BlockDeviceFile *bf, int64_t sector_num, uint8_t *buf, int n)
+{
+    /* Check if all requested sectors are in prefetch buffer */
+    if (bf->prefetch_buf && sector_num >= bf->prefetch_start && (sector_num + n) <= bf->prefetch_end) {
+        int64_t offset = (sector_num - bf->prefetch_start) * SECTOR_SIZE;
+        memcpy(buf, bf->prefetch_buf + offset, n * SECTOR_SIZE);
+        ide_cache_hits++;
+        return 1;
+    }
+    return 0;
+}
+#endif
 
 static int bf_read_async(BlockDevice *bs,
                          uint64_t sector_num, uint8_t *buf, int n,
@@ -1968,6 +2010,19 @@ static int bf_read_async(BlockDevice *bs,
 #ifdef BUILD_ESP32
         int64_t t0 = esp_timer_get_time();
 
+        /* Try prefetch buffer first */
+        if (ide_try_prefetch_read(bf, sector_num, buf, n)) {
+            ide_read_us += esp_timer_get_time() - t0;
+            
+            /* Log cache statistics every 500 operations */
+            if (ide_read_ops % 500 == 0) {
+                fprintf(stderr, "IDE: ops=%lu sectors=%lu hits=%lu misses=%lu avg=%llu us/op\n",
+                        ide_read_ops, ide_read_sectors, ide_cache_hits, ide_cache_misses,
+                        ide_read_us / ide_read_ops);
+            }
+            return 0;
+        }
+        
         if (bf->cache) {
             while (n > 0) {
                 int64_t line = sector_num / IDE_CACHE_LINE_SECTORS;
@@ -1989,6 +2044,21 @@ static int bf_read_async(BlockDevice *bs,
                     ide_cache_misses++;
                     ide_read_ops++;
                     ide_read_sectors += IDE_CACHE_LINE_SECTORS;
+                    
+                    /* Trigger prefetch for sequential reads */
+                    if (bf->last_sector >= 0 && sector_num == bf->last_sector + 1) {
+                        bf->sequential_count++;
+                        if (bf->sequential_count >= 2) {
+                            /* Sequential access detected - prefetch ahead */
+                            int64_t next_sector = sector_num + take;
+                            if (next_sector >= bf->prefetch_end || next_sector < bf->prefetch_start) {
+                                ide_prefetch_sectors(bf, next_sector, IDE_PREFETCH_SECTORS);
+                            }
+                        }
+                    } else {
+                        bf->sequential_count = 0;
+                    }
+                    bf->last_sector = sector_num + take - 1;
                 } else {
                     ide_cache_hits++;
                 }
@@ -2007,6 +2077,13 @@ static int bf_read_async(BlockDevice *bs,
         ide_read_us += esp_timer_get_time() - t0;
         ide_read_ops++;
         ide_read_sectors += n;
+        
+        /* Log cache statistics every 500 operations */
+        if (ide_read_ops % 500 == 0) {
+            fprintf(stderr, "IDE: ops=%lu sectors=%lu hits=%lu misses=%lu avg=%llu us/op\n",
+                    ide_read_ops, ide_read_sectors, ide_cache_hits, ide_cache_misses,
+                    ide_read_us / ide_read_ops);
+        }
 #endif
     }
     return 0;
@@ -2117,11 +2194,27 @@ static BlockDevice *block_device_init(const char *filename,
     if (mode != BF_MODE_SNAPSHOT) {
         bf->cache = (uint8_t*)heap_caps_malloc(IDE_CACHE_LINES * IDE_CACHE_LINE_BYTES, MALLOC_CAP_SPIRAM);
         bf->cache_tag = (int64_t*)heap_caps_malloc(IDE_CACHE_LINES * sizeof(int64_t), MALLOC_CAP_SPIRAM);
-        if (bf->cache && bf->cache_tag) {
+        bf->prefetch_buf = (uint8_t*)heap_caps_malloc(IDE_PREFETCH_SECTORS * SECTOR_SIZE, MALLOC_CAP_SPIRAM);
+        bf->prefetch_start = -1;
+        bf->prefetch_end = -1;
+        bf->last_sector = -1;
+        bf->sequential_count = 0;
+        
+        /* Log allocation results */
+        fprintf(stderr, "IDE: cache alloc: cache=%p tag=%p prefetch=%p (need %d + %d + %d bytes)\n",
+                bf->cache, bf->cache_tag, bf->prefetch_buf,
+                IDE_CACHE_LINES * IDE_CACHE_LINE_BYTES,
+                (int)(IDE_CACHE_LINES * sizeof(int64_t)),
+                IDE_PREFETCH_SECTORS * SECTOR_SIZE);
+        
+        if (bf->cache && bf->cache_tag && bf->prefetch_buf) {
             memset(bf->cache_tag, -1, IDE_CACHE_LINES * sizeof(int64_t));
+            fprintf(stderr, "IDE: cache enabled (2MB cache + 64KB prefetch)\n");
         } else {
+            fprintf(stderr, "IDE: cache DISABLED due to allocation failure!\n");
             bf->cache = NULL;
             bf->cache_tag = NULL;
+            bf->prefetch_buf = NULL;
         }
     }
 #endif

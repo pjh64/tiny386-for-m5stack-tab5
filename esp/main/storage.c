@@ -104,9 +104,52 @@ void storage_init(void)
 	/* slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP; */ /* off per Tab5 BSP */
 
 	ESP_LOGI(TAG, "Mounting filesystem");
-	esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &sdmount_config, &card);
+	ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &sdmount_config, &card);
 
 	if (ret != ESP_OK) {
+		ESP_LOGW(TAG, "SDIO mount failed (%s), falling back to SPI mode", esp_err_to_name(ret));
+		
+		/* Deinit SDMMC host before SPI fallback */
+		sdmmc_host_deinit();
+		
+		/* SPI fallback configuration */
+		spi_bus_config_t bus_cfg = {
+			.mosi_io_num     = SD_CMD,   /* CMD = MOSI */
+			.miso_io_num     = SD_D0,    /* D0 = MISO */
+			.sclk_io_num     = SD_CLK,   /* CLK = SCK */
+			.quadwp_io_num   = -1,
+			.quadhd_io_num   = -1,
+			.max_transfer_sz = 16384,
+		};
+		esp_err_t spi_ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+		if (spi_ret == ESP_OK) {
+			sdmmc_host_t spi_host = SDSPI_HOST_DEFAULT();
+			sdspi_device_config_t slot_cfg = SDSPI_DEVICE_CONFIG_DEFAULT();
+			slot_cfg.gpio_cs = SD_D3;    /* D3 = CS */
+			slot_cfg.host_id = SPI2_HOST;
+			spi_host.max_freq_khz = 20000;
+			
+			esp_vfs_fat_sdmmc_mount_config_t spi_mount_cfg = {
+				.format_if_mount_failed = false,
+				.max_files              = 3,
+				.allocation_unit_size   = 16 * 1024,
+			};
+			
+			spi_ret = esp_vfs_fat_sdspi_mount("/sdcard", &spi_host, &slot_cfg, &spi_mount_cfg, &card);
+			if (spi_ret == ESP_OK) {
+				ESP_LOGI(TAG, "SPI fallback successful");
+				sd_mount_ok = true;
+				rawsd = card;
+			} else {
+				ESP_LOGE(TAG, "SPI fallback also failed: %s", esp_err_to_name(spi_ret));
+			}
+		}
+	} else {
+		sd_mount_ok = true;
+		rawsd = card;
+	}
+
+	if (false) {
 		if (ret == ESP_FAIL) {
 			ESP_LOGE(TAG, "Failed to mount filesystem. "
 				 "If you want the card to be formatted, set the EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
@@ -181,7 +224,7 @@ void storage_init(void)
 			.sclk_io_num     = SD_SPI_SCK,
 			.quadwp_io_num   = -1,
 			.quadhd_io_num   = -1,
-			.max_transfer_sz = 4096,
+			.max_transfer_sz = 16384,
 		};
 		ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
 	}
