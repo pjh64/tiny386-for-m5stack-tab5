@@ -137,12 +137,22 @@ void vga_fb_unlock(void)
 static TaskHandle_t disp_task_handle = NULL;
 static uint16_t *rot_buf = NULL;
 static uint16_t *snap_buf = NULL;
+
+/* Alignment-sicherer Cache-Sync: Rundet Adresse auf und Größe ab */
+static inline void cache_msync_aligned(void *addr, size_t size, uint32_t flags) {
+    uintptr_t start = (uintptr_t)addr;
+    uintptr_t end = start + size;
+    uintptr_t aligned_start = (start + 127) & ~127;
+    uintptr_t aligned_end = end & ~127;
+    if (aligned_start < aligned_end) {
+        esp_cache_msync((void *)aligned_start, aligned_end - aligned_start, flags);
+    }
+}
+
 void vga_snapshot_fb(const uint16_t *fb)
 {
-	for (int y = 0; y < 480; y++)
-		memcpy(snap_buf + (size_t)y * 720,
-		       fb + (size_t)(y + 120) * LCD_WIDTH + 280, 720 * 2);
-	esp_cache_msync(snap_buf, 720 * 480 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+	/* ZERO-COPY: Direkt den Framebuffer syncen, kein memcpy */
+	cache_msync_aligned((void *)fb, VGA_FB_W * VGA_FB_H * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
 }
 static ppa_client_handle_t ppa_srm_handle = NULL;
 static volatile bool g_no_rotate = false;
@@ -250,7 +260,15 @@ Console *console_init(int width, int height)
 
 	/* VGA rendert in eigenen Buffer (PPA-Input); die PPA schreibt
 	 * zero-copy in den DPI-Framebuffer (Output). Kein In-Place! */
-	c->fb = bigmalloc(LCD_WIDTH * LCD_HEIGHT * 2);
+	size_t fb_sz = VGA_FB_W * VGA_FB_H * 2;
+	uint8_t *fb_raw = heap_caps_malloc(fb_sz + 128, MALLOC_CAP_SPIRAM);
+	if (fb_raw) {
+		c->fb = (u8 *)(((uintptr_t)fb_raw + 127) & ~(uintptr_t)127);
+		fprintf(stderr, "INFO: VGA FB aligned at %p\n", c->fb);
+	} else {
+		c->fb = bigmalloc(fb_sz);
+		fprintf(stderr, "WARN: Fallback bigmalloc for VGA FB\n");
+	}
 	return c;
 }
 
@@ -299,18 +317,13 @@ static void display_task(void *arg)
 		if (!src || !rot_buf || !snap_buf)
 			continue;
 		int64_t t0 = esp_timer_get_time();
-		/* Sync-Snapshot des 720x480-Fensters: display_task laeuft gerade
-		 * (Core 0) -> vga_task kann src nicht gleichzeitig schreiben.
-		 * PPA liest danach NUR snap_buf -> kein Tearing. */
-		for (int y = 0; y < 480; y++)
-			memcpy(snap_buf + (size_t)y * 720,
-			       src + (size_t)(y + 120) * LCD_WIDTH + 280, 720 * 2);
-		esp_cache_msync(snap_buf, 720 * 480 * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+		/* ZERO-COPY: PPA liest direkt aus src (128-byte aligned) */
+		cache_msync_aligned((void *)src, VGA_FB_W * VGA_FB_H * 2, ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
 		int64_t t1 = esp_timer_get_time();
 		if (ppa_srm_handle) {
 			ppa_srm_oper_config_t oper;
 			memset(&oper, 0, sizeof(oper));
-			oper.in.buffer  = snap_buf;
+			oper.in.buffer  = (void *)src; /* ZERO-COPY */
 			oper.in.pic_w   = 720;
 			oper.in.pic_h   = 480;
 			oper.in.block_offset_x = 0;
@@ -425,11 +438,11 @@ static int pc_main(const char *file)
 		return err;
 	}
 
-	if (conf.width != LCD_WIDTH || conf.height != LCD_HEIGHT) {
+	if (conf.width != VGA_FB_W || conf.height != VGA_FB_H) {
 		fprintf(stderr, "fixing width/height mismatch %dx%d => %dx%d\n",
 			conf.width, conf.height, LCD_WIDTH, LCD_HEIGHT);
-		conf.width = LCD_WIDTH;
-		conf.height = LCD_HEIGHT;
+		conf.width = VGA_FB_W;
+		conf.height = VGA_FB_H;
 	}
 
 	Console *console = console_init(conf.width, conf.height);

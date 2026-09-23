@@ -44,3 +44,6 @@
 /* I2C pins used by storage.c SPI-branch pre-init (harmless on Tab5) */
 #define LCD_I2C_SDA  31
 #define LCD_I2C_SCL  32
+
+#define VGA_FB_W 720
+#define VGA_FB_H 480

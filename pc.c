@@ -1049,22 +1049,56 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 
 	int16_t *d2 = (int16_t *) stream;
 	int16_t *d1 = (int16_t *) tmpbuf;
-	for (int i = 0; i < free / 2; i++) {
-		int res = d2[i] + d1[i / 2];
-		if (res > 32767) res = 32767;
-		if (res < -32768) res = -32768;
-		d2[i] = res;
+	int count = free / 2;
+	int i = 0;
+
+	/* SIMD-ähnliche Verarbeitung: 4 Samples (2 Stereo-Paare) pro Iteration */
+	for (; i <= count - 4; i += 4) {
+		int16_t m0 = d1[i / 2];
+		int16_t m1 = d1[(i + 2) / 2];
+
+		int32_t r0 = (int32_t)d2[i]   + m0;
+		int32_t r1 = (int32_t)d2[i+1] + m0;
+		int32_t r2 = (int32_t)d2[i+2] + m1;
+		int32_t r3 = (int32_t)d2[i+3] + m1;
+
+		/* Branchless Saturation (GCC optimiert dies zu MIN/MAX Instruktionen) */
+		d2[i]   = (r0 > 32767) ? 32767 : (r0 < -32768 ? -32768 : r0);
+		d2[i+1] = (r1 > 32767) ? 32767 : (r1 < -32768 ? -32768 : r1);
+		d2[i+2] = (r2 > 32767) ? 32767 : (r2 < -32768 ? -32768 : r2);
+		d2[i+3] = (r3 > 32767) ? 32767 : (r3 < -32768 ? -32768 : r3);
 	}
 
+	/* Restliche Samples verarbeiten */
+	for (; i < count; i++) {
+		int32_t res = (int32_t)d2[i] + d1[i / 2];
+		d2[i] = (res > 32767) ? 32767 : (res < -32768 ? -32768 : res);
+	}
+
+	/* PC Speaker Mixing (falls aktiv) */
 	if (pcspk_get_active_out(pc->pcspk)) {
 		memset(tmpbuf, 0x80, MIXER_BUF_LEN / 2);
 		pcspk_callback(pc->pcspk, tmpbuf, free / 4); // u8, mono
-		for (int i = 0; i < free / 2; i++) {
-			int res = d2[i];
-			res += ((int) tmpbuf[i / 2] - 0x80) << 5;
-			if (res > 32767) res = 32767;
-			if (res < -32768) res = -32768;
-			d2[i] = res;
+		uint8_t *pcspk = tmpbuf;
+		i = 0;
+		
+		for (; i <= count - 4; i += 4) {
+			int32_t p0 = ((int32_t)pcspk[i / 2] - 0x80) << 5;
+			int32_t p1 = ((int32_t)pcspk[(i + 2) / 2] - 0x80) << 5;
+
+			int32_t r0 = (int32_t)d2[i]   + p0;
+			int32_t r1 = (int32_t)d2[i+1] + p0;
+			int32_t r2 = (int32_t)d2[i+2] + p1;
+			int32_t r3 = (int32_t)d2[i+3] + p1;
+
+			d2[i]   = (r0 > 32767) ? 32767 : (r0 < -32768 ? -32768 : r0);
+			d2[i+1] = (r1 > 32767) ? 32767 : (r1 < -32768 ? -32768 : r1);
+			d2[i+2] = (r2 > 32767) ? 32767 : (r2 < -32768 ? -32768 : r2);
+			d2[i+3] = (r3 > 32767) ? 32767 : (r3 < -32768 ? -32768 : r3);
+		}
+		for (; i < count; i++) {
+			int32_t res = (int32_t)d2[i] + (((int32_t)pcspk[i / 2] - 0x80) << 5);
+			d2[i] = (res > 32767) ? 32767 : (res < -32768 ? -32768 : res);
 		}
 	}
 }

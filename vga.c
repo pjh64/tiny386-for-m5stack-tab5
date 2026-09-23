@@ -1371,7 +1371,7 @@ void vga_refresh(VGAState *s,
 {
     {
         uint32_t now = get_uticks();
-        int periodic = (now - s->last_ref) >= 200000;  /* 5 fps Zwangsrefresh */
+        int periodic = (now - s->last_ref) >= 33000;  /* 5 fps Zwangsrefresh */
         if (!s->dirty && !full_update && s->settle <= 0 && !periodic)
             return;
         s->last_ref = now;
