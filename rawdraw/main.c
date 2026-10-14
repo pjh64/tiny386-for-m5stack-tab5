@@ -7,11 +7,61 @@
 #include "osd/osd.h"
 #include "term.h"
 
+#ifndef ANDROID
 #define CNFG_IMPLEMENTATION
 #include "CNFG.h"
 
 #define CNFA_IMPLEMENTATION
 #include "CNFA.h"
+#else /* ANDROID */
+#include "CNFGAndroid.h"
+#include "android/vkbd.h"
+#define VKBD_SCALE 2
+#define FB_W 1280
+#define FB_H 960
+#define FB_X (android_width - FB_W)
+#define FB_Y ((android_height - FB_H) / 2)
+
+#define CNFA_IMPLEMENTATION
+#include "android/rawdrawandroid/cnfa/CNFA.h"
+
+#define CNFG_IMPLEMENTATION
+#define CNFG3D
+#include "android/rawdrawandroid/rawdraw/CNFG.h"
+
+volatile int suspended;
+void HandleThisWindowTermination()
+{
+	suspended = 1;
+}
+
+void HandleSuspend()
+{
+	suspended = 1;
+}
+
+void HandleResume()
+{
+	suspended = 0;
+}
+
+void CNFGBlitImage2( uint32_t * data, int x, int y, int w, int h, int w2, int h2 )
+{
+	glEnable( GL_TEXTURE_2D );
+	CNFGglActiveTexture( 0 );
+	glBindTexture( GL_TEXTURE_2D, gRDBlitProgTex );
+
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+
+	glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,  GL_RGBA,
+		GL_UNSIGNED_BYTE, data );
+
+	CNFGBlitTex( gRDBlitProgTex, x, y, w2, h2 );
+}
+#endif /* ANDROID */
 
 // platform HAL implementation
 #include <time.h>
@@ -66,6 +116,14 @@ typedef struct {
 	bool osd_enabled;
 	int lastx, lasty, relx, rely, dz;
 	int mbtn;
+#ifdef ANDROID
+	uint32_t touch_start, touch_end;
+	int touch_btn;
+	int btnup_pending;
+	int vkbdx, vkbdy;
+	int vkbdx_drag, vkbdy_drag;
+	bool vkbdinfo[VKBDLAYOUT_LEN];
+#endif
 } Console;
 
 void console_send_kbd(void *opaque, int keypress, int keycode)
@@ -77,6 +135,7 @@ void console_send_kbd(void *opaque, int keypress, int keycode)
 Console *console_init(int width, int height)
 {
 	Console *s = malloc(sizeof(Console));
+	memset(s, 0, sizeof(Console));
 	s->osd = osd_init();
 	s->osd_enabled = false;
 #ifdef SWAPXY
@@ -88,7 +147,14 @@ Console *console_init(int width, int height)
 #endif
 	s->fb = bigmalloc(s->width * s->height * 4);
 	s->cnfgret = 1;
+#ifndef ANDROID
 	CNFGSetup("tiny386 - use ctrl + ] to grab/ungrab", s->width, s->height);
+#else
+	HandleWindowTermination = HandleThisWindowTermination;
+	CNFGSetupFullscreen( "tiny386", 0 );
+	s->vkbdx = 0;
+	s->vkbdy = (android_height - VKBDLAYOUT_H * VKBD_SCALE) * 3 / 4;
+#endif
 	osd_attach_console(s->osd, s);
 	s->lastx = -1;
 	s->lasty = -1;
@@ -106,7 +172,31 @@ static void redraw(void *opaque, int x, int y, int w, int h)
 	if (s->osd_enabled)
 		osd_render(s->osd, s->fb,
 			   s->width, s->height, s->width * 4);
+#ifndef ANDROID
 	CNFGUpdateScreenWithBitmap(s->fb, s->width, s->height);
+#else
+	if (suspended) {
+		return;
+	}
+	CNFGClearFrame();
+
+	static uint32_t fbk[VKBDLAYOUT_W * VKBDLAYOUT_H];
+	vkbd_draw(fbk, VKBDLAYOUT_W, VKBDLAYOUT_H, 0, 0, s->vkbdinfo);
+	for (int i = 0; i < VKBDLAYOUT_W * VKBDLAYOUT_H; i++)
+		fbk[i] = (fbk[i] << 8) | (fbk[i] >> 24);
+
+	static uint32_t fb2[2000*2000];
+	assert(s->width * s->height < 2000 * 2000);
+	uint32_t *fb = s->fb;
+	for (int i = 0; i < s->width * s->height; i++)
+		fb2[i] = (fb[i] << 8) | 0xff;
+
+	CNFGBlitImage2(fb2, FB_X, FB_Y, s->width, s->height, FB_W, FB_H);
+	CNFGBlitImage2(fbk, s->vkbdx, s->vkbdy,
+		       VKBDLAYOUT_W, VKBDLAYOUT_H,
+		       VKBDLAYOUT_W * VKBD_SCALE, VKBDLAYOUT_H * VKBD_SCALE);
+	CNFGSwapBuffers();
+#endif
 }
 
 static void dummy(void *opaque, int x, int y, int w, int h)
@@ -114,10 +204,18 @@ static void dummy(void *opaque, int x, int y, int w, int h)
 }
 
 static void *g_opaque;
+static void mouse_common(int rel, int x, int y, int mask, int down);
 static void cnfgpoll(void *opaque)
 {
 	Console *s = opaque;
 	g_opaque = s;
+#ifdef ANDROID
+	if (s->btnup_pending) {
+		s->btnup_pending--;
+		if (s->btnup_pending == 0)
+			mouse_common(1, 0, 0, 0, 0);
+	}
+#endif
 	s->cnfgret = CNFGHandleInput();
 }
 
@@ -130,8 +228,10 @@ static void update_mouse(Console *s, int rel, int x, int y, int cnfgmask)
 		s->lasty += y;
 		if (s->lastx < 0) s->lastx = 0;
 		if (s->lasty < 0) s->lasty = 0;
+#ifndef ANDROID
 		if (s->lastx > 2048) s->lastx = 2048;
 		if (s->lasty > 2048) s->lasty = 2048;
+#endif
 	} else {
 		if (s->lastx < 0 || s->lasty < 0) {
 			s->lastx = x;
@@ -177,10 +277,9 @@ static void put_key(void *o, unsigned char scan_code, int is_pressed)
 #define KEYCODE_MAX 127
 static uint8_t key_pressed[KEYCODE_MAX + 1];
 
-void HandleKey(int cnfgkeycode, int bDown)
+static void kbd_common(int keycode, int bDown)
 {
 	Console *s = g_opaque;
-	int keycode = translate_key(cnfgkeycode);
 	if (keycode <= KEYCODE_MAX)
 		key_pressed[keycode] = bDown;
 
@@ -192,6 +291,7 @@ void HandleKey(int cnfgkeycode, int bDown)
 			s->pc->full_update = s->osd_enabled ? 1 : 2;
 			return;
 		}
+#ifndef ANDROID
 		if (keycode == 0x1b && key_pressed[0x1d]) {
 			static int en;
 			en ^= 1;
@@ -199,6 +299,7 @@ void HandleKey(int cnfgkeycode, int bDown)
 			CNFGSetCursor(en ? CNFG_CURSOR_HIDDEN : CNFG_CURSOR_ARROW);
 			return;
 		}
+#endif
 	}
 
 	if (keycode) {
@@ -209,16 +310,35 @@ void HandleKey(int cnfgkeycode, int bDown)
 	}
 }
 
+void HandleKey(int cnfgkeycode, int bDown)
+{
+#ifndef ANDROID
+	int keycode = translate_key(cnfgkeycode);
+	kbd_common(keycode, bDown);
+#else
+	int akeycode_to_linux(int akeycode);
+	int keycode = akeycode_to_linux(cnfgkeycode);
+	kbd_common(keycode, !bDown);
+#endif
+	return;
+}
+
 static void mouse_common(int rel, int x, int y, int mask, int down)
 {
 	Console *s = g_opaque;
 	update_mouse(s, rel, x, y, mask);
 	if (s->osd_enabled) {
+		int lastx = s->lastx;
+		int lasty = s->lasty;
+#ifdef ANDROID
+		lastx = (lastx - FB_X) * s->width / FB_W;
+		lasty = (lasty - FB_Y) * s->height / FB_H;
+#endif
 		if (down >= 0)
-			osd_handle_mouse_button(s->osd,	s->lastx, s->lasty,
+			osd_handle_mouse_button(s->osd, lastx, lasty,
 						down, 1 /* XXX */);
 		else
-			osd_handle_mouse_motion(s->osd, s->lastx, s->lasty);
+			osd_handle_mouse_motion(s->osd,	lastx, lasty);
 	} else
 		ps2_mouse_event(s->pc->mouse, s->relx, s->rely,
 				s->dz, s->mbtn);
@@ -226,12 +346,77 @@ static void mouse_common(int rel, int x, int y, int mask, int down)
 
 void HandleButton(int x, int y, int button, int bDown)
 {
+#ifdef ANDROID
+	Console *s = g_opaque;
+	if (x >= s->vkbdx && x < s->vkbdx + VKBDLAYOUT_W * VKBD_SCALE &&
+	    y >= s->vkbdy && y < s->vkbdy + VKBDLAYOUT_H * VKBD_SCALE) {
+		int i = vkbd_button((x - s->vkbdx) / VKBD_SCALE,
+				    (y - s->vkbdy) / VKBD_SCALE);
+		if (i >= 0) {
+			s->vkbdinfo[i] = bDown;
+			int keycode = vkbd_code(i);
+			if (keycode > 0) {
+				kbd_common(keycode, bDown);
+			}
+			if (keycode == -1) {
+				s->vkbdx_drag = x - s->vkbdx;
+				s->vkbdy_drag = y - s->vkbdy;
+			}
+		}
+		return;
+	}
+	uint32_t t2 = get_uticks();
+	if (bDown) {
+		s->touch_start = t2;
+		if (t2 - s->touch_end < 200000) {
+			s->touch_btn = 1;
+		} else {
+			s->touch_btn = 0;
+		}
+	}
+	if (!bDown) {
+		if (t2 - s->touch_start < 200000) {
+			mouse_common(1, 0, 0, 1, 1);
+			s->btnup_pending = 100;
+		} else if (t2 - s->touch_start < 500000) {
+			mouse_common(1, 0, 0, 4, 1);
+			s->btnup_pending = 100;
+		}
+		s->touch_start = t2 - 1100000;
+		s->touch_end = t2;
+	}
+	s->lastx = x;
+	s->lasty = y;
+#else
 	mouse_common(0, x, y, bDown ? 1 << (button - 1) : 0, !!bDown);
+#endif
 }
 
 void HandleMotion(int x, int y, int mask)
 {
+#ifdef ANDROID
+	Console *s = g_opaque;
+	if (x >= s->vkbdx && x < s->vkbdx + VKBDLAYOUT_W * VKBD_SCALE &&
+	    y >= s->vkbdy && y < s->vkbdy + VKBDLAYOUT_H * VKBD_SCALE) {
+		int i = vkbd_button((x - s->vkbdx) / VKBD_SCALE,
+				    (y - s->vkbdy) / VKBD_SCALE);
+		if (i >= 0 && s->vkbdinfo[i]) {
+			int code = vkbd_code(i);
+			if (code == -1) {
+				s->vkbdx = x - s->vkbdx_drag;
+				s->vkbdy = y - s->vkbdy_drag;
+			}
+		}
+		return;
+	}
+	if (abs(s->lastx - x) > 5 || abs(s->lasty - y) > 5)
+		s->touch_start = get_uticks() - 1100000;
+	if (s->touch_btn)
+		s->btnup_pending = 0;
+	mouse_common(0, x, y, s->touch_btn, -1);
+#else
 	mouse_common(0, x, y, mask, -1);
+#endif
 }
 
 void HandleButtonRel(int x, int y, int button, int bDown)
@@ -279,6 +464,27 @@ static void usage(const char *argv0)
 		argv0);
 }
 
+#ifndef _WIN32
+#include <signal.h>
+volatile int g_running = 1;
+static void sig_handler(int _)
+{
+	g_running = 0;
+}
+static void set_sig_handler()
+{
+	signal(SIGTERM, sig_handler);
+	signal(SIGINT, sig_handler);
+}
+#else
+#define g_running 1
+#define set_sig_handler()
+#endif
+
+#ifdef ANDROID
+#define main main1
+#endif
+
 int main(int argc, char *argv[])
 {
 	PCConfig conf;
@@ -323,6 +529,8 @@ int main(int argc, char *argv[])
 	if (enable_kvm)
 		conf.cpu_gen = -1;
 
+	set_sig_handler();
+
 	if (headless) {
 		void *fb = bigmalloc(conf.width * conf.height * 4);
 		PC *pc = pc_new(dummy, NULL, fb, &conf);
@@ -333,7 +541,7 @@ int main(int argc, char *argv[])
 		load_bios_and_reset(pc);
 
 		pc->boot_start_time = get_uticks();
-		for (; pc->shutdown_state != 8;) {
+		for (; g_running && pc->shutdown_state != 8;) {
 			pc_step(pc);
 			pc_vga_step(pc);
 			if (use_term)
@@ -349,10 +557,58 @@ int main(int argc, char *argv[])
 	load_bios_and_reset(pc);
 
 	pc->boot_start_time = get_uticks();
-	for (; pc->shutdown_state != 8 && console->cnfgret;) {
+	for (; g_running && pc->shutdown_state != 8 && console->cnfgret;) {
 		pc_step(pc);
 		cnfgpoll(console);
 		pc_vga_step(pc);
 	}
 	return 0;
 }
+
+#ifdef ANDROID
+#undef main
+static void create_default(const char *name, const char *content)
+{
+	FILE *fp;
+	fp = fopen(name, "r");
+	if (!fp) {
+		fp = fopen(name, "w");
+		if (fp) {
+			fputs(content, fp);
+			fclose(fp);
+		}
+	}
+}
+
+int main(int argc, char *_argv[])
+{
+	char *argv[3] = {
+		_argv[0],
+		"tiny386.ini",
+		NULL,
+	};
+	chdir(gapp->activity->externalDataPath);
+	create_default("resolv.conf", "nameserver 8.8.8.8\n");
+	create_default("tiny386.ini",
+		       "[pc]\n"
+		       "bios = \n"
+		       "vga_bios = \n"
+		       "mem_size = 32M\n"
+		       "vga_mem_size = 4M\n"
+		       "vga_force_8dm = 1\n"
+		       ";fill_cmos = 1\n"
+		       "hda = \n"
+		       "[display]\n"
+		       "width = 640\n"
+		       "height = 480\n"
+		       "[cpu]\n"
+		       "gen = 6\n"
+		       "fpu = 1\n");
+	int ret = main1(2, argv);
+	if (gapp && gapp->activity) {
+		ANativeActivity_finish(gapp->activity);
+	}
+	exit(ret);
+	return ret;
+}
+#endif
